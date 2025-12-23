@@ -5,6 +5,7 @@ A simple, colorful CLI wrapper around `curl` for easier terminal usage.
 ## Features
 
 - 🎨 **Syntax-highlighted JSON** - Pretty print responses with colored output
+- 📄 **Request files** - Load headers and body from JSON files
 - 🔍 **Smart JSON detection** - Auto-adds `Content-Type: application/json` when sending JSON
 - 🏠 **Localhost shorthand** - Use `:3000/api` instead of `http://localhost:3000/api`
 - ⏱️ **Response timing** - See how long requests take
@@ -43,6 +44,50 @@ gurl -m POST -d '{"name":"John"}' https://api.example.com/users
 gurl --pretty -v -m POST -d '{"title":"Hello"}' https://api.example.com/posts
 ```
 
+### Request Files
+
+Load complex requests from JSON files:
+
+```bash
+# Load entire request from file
+gurl --file request.json --pretty
+
+# Override URL from file
+gurl --file request.json https://different-url.com
+
+# Override method from file
+gurl --file request.json -m PUT
+```
+
+**Request file format:**
+
+```json
+{
+  "method": "POST",
+  "url": "https://api.example.com/users",
+  "headers": {
+    "Authorization": "Bearer token123",
+    "X-Custom": "value"
+  },
+  "body": {
+    "name": "John",
+    "email": "john@example.com"
+  }
+}
+```
+
+Headers can also be an array:
+
+```json
+{
+  "headers": [
+    "Authorization: Bearer token123",
+    "Content-Type: application/json"
+  ],
+  "body": { "key": "value" }
+}
+```
+
 ### Headers & Auth
 
 ```bash
@@ -63,6 +108,7 @@ gurl -H "Accept: application/json" -H "X-Custom: value" https://api.example.com
 | `-m` | `--method`   | HTTP method (GET, POST, PUT, DELETE, PATCH) |
 | `-d` | `--data`     | Request body (JSON auto-detected)           |
 | `-H` | `--headers`  | Add header (repeatable)                     |
+| `-f` | `--file`     | Load request from JSON file                 |
 | `-p` | `--pretty`   | Pretty print JSON with syntax highlighting  |
 | `-v` | `--verbose`  | Show full curl command and request details  |
 | `-s` | `--silent`   | Suppress progress meter                     |
@@ -94,10 +140,8 @@ gurl --pretty https://jsonplaceholder.typicode.com/posts/1
 gurl -m POST -d '{"userId":1,"title":"foo","body":"bar"}' \
   --pretty https://jsonplaceholder.typicode.com/posts
 
-# Verbose mode shows request details
-gurl -v --pretty -m PUT -d '{"name":"Updated"}' \
-  -H "Authorization: Bearer token" \
-  https://api.example.com/users/1
+# Using a request file
+gurl --file examples/create_post.json --pretty -v
 
 # Quick localhost API testing
 gurl :3000/api/health

@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "url": "https://jsonplaceholder.typicode.com/posts",
+  "headers": {
+    "Authorization": "Bearer test-token",
+    "X-Custom-Header": "custom-value"
+  },
+  "body": {
+    "title": "Hello from request file",
+    "body": "This is a test post",
+    "userId": 1
+  }
+}

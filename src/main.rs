@@ -1,6 +1,10 @@
+use anyhow::Context;
 use clap::Parser;
 use colored::*;
+use serde::Deserialize;
 use serde_json::Value;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
@@ -13,11 +17,12 @@ use std::time::Instant;
 )]
 struct Args {
     /// The URL to request (use :port/path as shorthand for localhost)
-    url: String,
+    /// Can be omitted if using --file with url field
+    url: Option<String>,
 
     /// Request method (GET, POST, PUT, DELETE, PATCH, etc.)
-    #[arg(short = 'm', long, default_value = "GET")]
-    method: String,
+    #[arg(short = 'm', long)]
+    method: Option<String>,
 
     /// Data payload (auto-detects JSON and sets Content-Type)
     #[arg(short, long)]
@@ -26,6 +31,10 @@ struct Args {
     /// Headers to include (can be used multiple times)
     #[arg(short = 'H', long)]
     headers: Vec<String>,
+
+    /// Load request from JSON file (headers, body, method, url)
+    #[arg(short, long)]
+    file: Option<PathBuf>,
 
     /// Include HTTP headers in the output
     #[arg(short = 'i', long)]
@@ -62,6 +71,46 @@ struct Args {
     /// Extra arguments passed directly to curl
     #[arg(last = true)]
     extra_args: Vec<String>,
+}
+
+/// Request configuration loaded from a file
+#[derive(Debug, Deserialize, Default)]
+struct RequestFile {
+    /// Optional URL (can be overridden by CLI)
+    url: Option<String>,
+
+    /// Optional HTTP method (can be overridden by CLI)
+    method: Option<String>,
+
+    /// Headers as array of strings or object
+    #[serde(default)]
+    headers: HeadersFormat,
+
+    /// Request body (can be object, array, or string)
+    body: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(untagged)]
+enum HeadersFormat {
+    #[default]
+    None,
+    /// Array of "Key: Value" strings
+    Array(Vec<String>),
+    /// Object { "Key": "Value" }
+    Object(std::collections::HashMap<String, String>),
+}
+
+impl HeadersFormat {
+    fn to_vec(&self) -> Vec<String> {
+        match self {
+            HeadersFormat::None => vec![],
+            HeadersFormat::Array(arr) => arr.clone(),
+            HeadersFormat::Object(obj) => {
+                obj.iter().map(|(k, v)| format!("{}: {}", k, v)).collect()
+            }
+        }
+    }
 }
 
 fn expand_url(url: &str) -> String {
@@ -149,6 +198,7 @@ fn print_request_info(
     headers: &[String],
     data: Option<&String>,
     verbose: bool,
+    file_path: Option<&PathBuf>,
 ) {
     // Method and URL
     let method_color = match method {
@@ -161,6 +211,13 @@ fn print_request_info(
     };
 
     println!();
+    if let Some(path) = file_path {
+        println!(
+            "{} {}",
+            "📄".dimmed(),
+            format!("Loading from {}", path.display()).dimmed()
+        );
+    }
     println!(
         "{} {} {}",
         "▶".bold().cyan(),
@@ -190,21 +247,74 @@ fn print_request_info(
     println!();
 }
 
+fn load_request_file(path: &PathBuf) -> anyhow::Result<RequestFile> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read request file: {}", path.display()))?;
+
+    let request: RequestFile = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse request file: {}", path.display()))?;
+
+    Ok(request)
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let url = expand_url(&args.url);
+
+    // Load request file if specified
+    let request_file = if let Some(ref path) = args.file {
+        Some(load_request_file(path)?)
+    } else {
+        None
+    };
+
+    // Resolve URL (CLI overrides file)
+    let url = args
+        .url
+        .clone()
+        .or_else(|| request_file.as_ref().and_then(|r| r.url.clone()))
+        .ok_or_else(|| anyhow::anyhow!("URL is required (provide as argument or in --file)"))?;
+    let url = expand_url(&url);
+
+    // Resolve method (CLI overrides file, default GET)
+    let method = args
+        .method
+        .clone()
+        .or_else(|| request_file.as_ref().and_then(|r| r.method.clone()))
+        .unwrap_or_else(|| "GET".to_string())
+        .to_uppercase();
+
+    // Merge headers (file headers first, then CLI headers)
+    let mut all_headers: Vec<String> = request_file
+        .as_ref()
+        .map(|r| r.headers.to_vec())
+        .unwrap_or_default();
+    all_headers.extend(args.headers.clone());
+
+    // Resolve body (CLI -d overrides file body)
+    let body_data: Option<String> = args.data.clone().or_else(|| {
+        request_file.as_ref().and_then(|r| {
+            r.body.as_ref().map(|b| {
+                // Convert body Value to string
+                if b.is_string() {
+                    b.as_str().unwrap().to_string()
+                } else {
+                    serde_json::to_string(b).unwrap_or_default()
+                }
+            })
+        })
+    });
 
     let mut cmd = Command::new("curl");
     let mut curl_args: Vec<String> = Vec::new();
 
     // Method
     curl_args.push("-X".to_string());
-    curl_args.push(args.method.to_uppercase());
+    curl_args.push(method.clone());
 
     // Data with auto JSON detection
-    let mut effective_headers = args.headers.clone();
-    if let Some(ref data) = args.data {
-        if looks_like_json(data) && !has_content_type_header(&args.headers) {
+    let mut effective_headers = all_headers.clone();
+    if let Some(ref data) = body_data {
+        if looks_like_json(data) && !has_content_type_header(&all_headers) {
             effective_headers.push("Content-Type: application/json".to_string());
         }
     }
@@ -216,7 +326,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Data
-    if let Some(ref data) = args.data {
+    if let Some(ref data) = body_data {
         curl_args.push("-d".to_string());
         curl_args.push(data.clone());
     }
@@ -268,11 +378,12 @@ fn main() -> anyhow::Result<()> {
 
     // Request info
     print_request_info(
-        &args.method.to_uppercase(),
+        &method,
         &url,
         &effective_headers,
-        args.data.as_ref(),
+        body_data.as_ref(),
         args.verbose,
+        args.file.as_ref(),
     );
 
     if args.verbose {
