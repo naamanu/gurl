@@ -313,10 +313,11 @@ fn main() -> anyhow::Result<()> {
 
     // Data with auto JSON detection
     let mut effective_headers = all_headers.clone();
-    if let Some(ref data) = body_data {
-        if looks_like_json(data) && !has_content_type_header(&all_headers) {
-            effective_headers.push("Content-Type: application/json".to_string());
-        }
+    if let Some(ref data) = body_data
+        && looks_like_json(data)
+        && !has_content_type_header(&all_headers)
+    {
+        effective_headers.push("Content-Type: application/json".to_string());
     }
 
     // Headers

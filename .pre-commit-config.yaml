@@ -1,0 +1,19 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: bash -c 'if ! cargo fmt --all -- --check; then cargo fmt --all && exit 1; fi'
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: bash -c 'cargo clippy --all-targets --all-features -- -D warnings'
+        language: system
+        types: [rust]
+        pass_filenames: false
+        always_run: true
+

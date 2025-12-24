@@ -18,6 +18,35 @@ A simple, colorful CLI wrapper around `curl` for easier terminal usage.
 cargo install --path .
 ```
 
+## Development
+
+### Pre-commit Hooks
+
+This project uses pre-commit hooks to ensure code quality. To set them up:
+
+1. Install pre-commit:
+   ```bash
+   # Using pip
+   pip install pre-commit
+   
+   # Or using homebrew (macOS)
+   brew install pre-commit
+   ```
+
+2. Install the git hooks:
+   ```bash
+   pre-commit install
+   ```
+
+The hooks will automatically:
+- Format code with `cargo fmt` before each commit
+- Run `cargo clippy` to catch linting issues
+
+To manually run the hooks:
+```bash
+pre-commit run --all-files
+```
+
 ## Usage
 
 ### Basic Requests
