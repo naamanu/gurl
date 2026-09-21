@@ -138,7 +138,7 @@ mod tests {
     use std::io::Write;
 
     fn args(argv: &[&str]) -> Args {
-        Args::parse_from(std::iter::once("gurl").chain(argv.iter().copied()))
+        crate::args::Cli::parse_from(std::iter::once("gurl").chain(argv.iter().copied())).args
     }
 
     fn file(json: &str) -> RequestFile {

@@ -1,4 +1,5 @@
 use crate::curl::{Body, CurlRequest};
+use crate::exec::Meta;
 use colored::*;
 use serde_json::Value;
 use std::io::{self, Write};
@@ -137,39 +138,128 @@ pub fn write_response_headers(w: &mut impl Write, headers: &str) -> io::Result<(
     Ok(())
 }
 
-pub fn print_success_footer(status: Option<u16>, elapsed: Duration) {
-    eprintln!();
-    // curl succeeded, but the server may still have answered with an error
-    let failed = status.is_some_and(|code| code >= 400);
-    if let Some(code) = status {
-        eprint!("{} ", status_colored(code, &code.to_string()));
-    }
-    if failed {
-        eprintln!(
-            "{} {} in {elapsed:.2?}",
-            "✗".red().bold(),
-            "Error response received".red()
-        );
+/// Reason phrase for the status codes worth naming
+pub fn reason_phrase(code: u16) -> Option<&'static str> {
+    Some(match code {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        422 => "Unprocessable Content",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => return None,
+    })
+}
+
+pub fn format_duration(d: Duration) -> String {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms < 1.0 {
+        format!("{ms:.1}ms")
+    } else if ms < 1000.0 {
+        format!("{ms:.0}ms")
+    } else if ms < 60_000.0 {
+        format!("{:.2}s", ms / 1000.0)
     } else {
-        eprintln!(
-            "{} {} in {elapsed:.2?}",
-            "✓".green().bold(),
-            "Response received".green()
-        );
+        let secs = d.as_secs();
+        format!("{}m {:02}s", secs / 60, secs % 60)
     }
 }
 
-/// curl itself failed; it has already explained why on stderr (`-S`).
-pub fn print_failure_footer(status: Option<u16>, exit_code: i32, elapsed: Duration) {
-    eprintln!();
-    if let Some(code) = status {
-        eprint!("{} ", status_colored(code, &code.to_string()));
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
-    eprintln!(
-        "{} {} in {elapsed:.2?} (curl exit code {exit_code})",
-        "✗".red().bold(),
-        "Failed".red()
-    );
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// `HTTP 404 Not Found`, colored by status class
+fn status_text(code: u16) -> ColoredString {
+    let text = match reason_phrase(code) {
+        Some(reason) => format!("HTTP {code} {reason}"),
+        None => format!("HTTP {code}"),
+    };
+    status_colored(code, &text)
+}
+
+/// The footer printed after a response, e.g. `✓ HTTP 200 OK · 41ms · 1.2 KB`.
+/// `curl_exit_code` is set when curl itself failed.
+pub fn footer_line(meta: &Meta, elapsed: Duration, curl_exit_code: Option<i32>) -> String {
+    // Prefer curl's own timing: it excludes gurl's startup and printing
+    let time = meta
+        .time_total
+        .map(Duration::from_secs_f64)
+        .unwrap_or(elapsed);
+
+    let is_error = curl_exit_code.is_some() || meta.status.is_some_and(|code| code >= 400);
+    let mut parts: Vec<String> = Vec::new();
+    match meta.status {
+        Some(code) => parts.push(status_text(code).to_string()),
+        None if curl_exit_code.is_none() => parts.push("Done".green().to_string()),
+        None => {}
+    }
+    if curl_exit_code.is_some() {
+        parts.push("Failed".red().to_string());
+    }
+    parts.push(format_duration(time));
+    if curl_exit_code.is_none()
+        && let Some(size) = meta.size_download
+    {
+        parts.push(format_size(size));
+    }
+
+    let icon = if is_error {
+        "✗".red().bold()
+    } else {
+        "✓".green().bold()
+    };
+    let mut line = format!("{icon} {}", parts.join(&" · ".dimmed().to_string()));
+    if let Some(code) = curl_exit_code {
+        line.push_str(&format!(" {}", format!("(curl exit code {code})").dimmed()));
+    }
+    line
+}
+
+pub fn print_success_footer(meta: &Meta, elapsed: Duration) {
+    eprintln!();
+    eprintln!("{}", footer_line(meta, elapsed, None));
+}
+
+/// curl itself failed; it has already explained why on stderr (`-S`).
+pub fn print_failure_footer(meta: &Meta, exit_code: i32, elapsed: Duration) {
+    eprintln!();
+    eprintln!("{}", footer_line(meta, elapsed, Some(exit_code)));
 }
 
 #[cfg(test)]
@@ -245,6 +335,83 @@ mod tests {
     fn format_request_body_non_json() {
         let input = "plain text body";
         assert_eq!(format_request_body(input), input);
+    }
+
+    fn meta(status: Option<u16>, time: f64, size: u64) -> Meta {
+        Meta {
+            status,
+            time_total: Some(time),
+            size_download: Some(size),
+            content_type: None,
+        }
+    }
+
+    fn footer(meta: &Meta, exit: Option<i32>) -> String {
+        colored::control::set_override(false);
+        footer_line(meta, Duration::from_secs(9), exit)
+    }
+
+    #[test]
+    fn footer_for_a_successful_response() {
+        assert_eq!(
+            footer(&meta(Some(201), 0.1423, 1234), None),
+            "✓ HTTP 201 Created · 142ms · 1.2 KB"
+        );
+    }
+
+    #[test]
+    fn footer_for_an_error_response() {
+        assert_eq!(
+            footer(&meta(Some(404), 0.05, 12), None),
+            "✗ HTTP 404 Not Found · 50ms · 12 B"
+        );
+        assert_eq!(
+            footer(&meta(Some(599), 0.05, 0), None),
+            "✗ HTTP 599 · 50ms · 0 B"
+        );
+    }
+
+    #[test]
+    fn footer_without_http_status() {
+        assert_eq!(
+            footer(&meta(None, 0.0004, 213), None),
+            "✓ Done · 0.4ms · 213 B"
+        );
+    }
+
+    #[test]
+    fn footer_when_curl_fails() {
+        assert_eq!(
+            footer(&meta(None, 0.009, 0), Some(7)),
+            "✗ Failed · 9ms (curl exit code 7)"
+        );
+        assert_eq!(
+            footer(&meta(Some(200), 1.5, 999), Some(28)),
+            "✗ HTTP 200 OK · Failed · 1.50s (curl exit code 28)"
+        );
+    }
+
+    #[test]
+    fn footer_falls_back_to_our_own_timing() {
+        assert_eq!(footer(&Meta::default(), None), "✓ Done · 9.00s");
+    }
+
+    #[test]
+    fn format_duration_picks_a_readable_unit() {
+        assert_eq!(format_duration(Duration::from_micros(250)), "0.2ms");
+        assert_eq!(format_duration(Duration::from_millis(41)), "41ms");
+        assert_eq!(format_duration(Duration::from_millis(1234)), "1.23s");
+        assert_eq!(format_duration(Duration::from_secs(65)), "1m 05s");
+    }
+
+    #[test]
+    fn format_size_picks_a_readable_unit() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
     #[test]

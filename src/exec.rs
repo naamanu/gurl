@@ -2,15 +2,25 @@ use crate::curl::{self, CurlRequest, META_SENTINEL};
 use crate::format;
 use colored::*;
 use serde_json::Value;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Instant;
 
+/// What the user asked for with `--pretty` / `--raw`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PrettyChoice {
+    /// Pretty on a terminal, raw when piped
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
 /// How gurl presents the response (as opposed to what curl is asked to do).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RunOptions {
-    pub pretty: bool,
+    pub pretty: PrettyChoice,
     pub silent: bool,
     pub show_secrets: bool,
 }
@@ -19,16 +29,30 @@ pub struct RunOptions {
 pub enum OutputMode {
     /// curl writes straight to our stdout: streaming and binary-safe
     Raw,
-    /// The response is buffered so it can be formatted before printing
+    /// The response passes through gurl so JSON can be formatted
+    /// (see `relay_response`)
     Pretty,
 }
 
-pub fn output_mode(pretty: bool, has_output_file: bool) -> OutputMode {
-    if pretty && !has_output_file {
+pub fn output_mode(pretty: PrettyChoice, has_output_file: bool, stdout_is_tty: bool) -> OutputMode {
+    let wanted = match pretty {
+        PrettyChoice::Always => true,
+        PrettyChoice::Never => false,
+        PrettyChoice::Auto => stdout_is_tty,
+    };
+    if wanted && !has_output_file {
         OutputMode::Pretty
     } else {
         OutputMode::Raw
     }
+}
+
+/// What happened, for the caller to turn into an exit code.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outcome {
+    /// curl's exit code
+    pub exit_code: i32,
+    pub meta: Meta,
 }
 
 /// Response metadata reported by curl through `curl::meta_write_out`.
@@ -153,17 +177,60 @@ fn write_response(w: &mut impl Write, response: &[u8], has_headers: bool) -> io:
     w.flush()
 }
 
-fn print_response(response: &[u8], has_headers: bool) -> io::Result<()> {
+/// Relay the response from `r` to `w`, pretty-printing it if it is JSON.
+///
+/// Only something that starts like JSON has to be held back until the end;
+/// anything else (HTML, text, event streams, binary) is passed through as it
+/// arrives. With `-i` the header block(s) come first, so that is buffered.
+fn relay_response<R: Read, W: Write>(mut r: R, w: &mut W, has_headers: bool) -> io::Result<()> {
+    let mut buf = Vec::new();
+    if has_headers {
+        r.read_to_end(&mut buf)?;
+        return write_response(w, &buf, true);
+    }
+
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            // Empty or whitespace only
+            w.write_all(&buf)?;
+            return w.flush();
+        }
+        buf.extend_from_slice(&chunk[..n]);
+
+        let Some(&first) = buf.iter().find(|b| !b.is_ascii_whitespace()) else {
+            continue;
+        };
+        if first == b'{' || first == b'[' {
+            r.read_to_end(&mut buf)?;
+            return write_response(w, &buf, false);
+        }
+
+        w.write_all(&buf)?;
+        w.flush()?;
+        loop {
+            let n = r.read(&mut chunk)?;
+            if n == 0 {
+                return Ok(());
+            }
+            w.write_all(&chunk[..n])?;
+            w.flush()?;
+        }
+    }
+}
+
+fn print_response<R: Read>(r: R, has_headers: bool) -> io::Result<()> {
     let mut stdout = BufWriter::new(io::stdout().lock());
-    match write_response(&mut stdout, response, has_headers) {
+    match relay_response(r, &mut stdout, has_headers) {
         // The reader went away (`gurl ... | head`): not an error
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         result => result,
     }
 }
 
-/// Run curl for `req` and return the exit code gurl should finish with.
-pub fn run(req: &CurlRequest, opts: &RunOptions) -> anyhow::Result<i32> {
+/// Run curl for `req`, printing the response and gurl's status footer.
+pub fn run(req: &CurlRequest, opts: &RunOptions) -> anyhow::Result<Outcome> {
     if req.verbose && !opts.silent {
         let shown = if opts.show_secrets {
             req.clone()
@@ -178,7 +245,11 @@ pub fn run(req: &CurlRequest, opts: &RunOptions) -> anyhow::Result<i32> {
         eprintln!();
     }
 
-    let mode = output_mode(opts.pretty, req.output.is_some());
+    let mode = output_mode(
+        opts.pretty,
+        req.output.is_some(),
+        io::stdout().is_terminal(),
+    );
 
     let mut cmd = Command::new("curl");
     cmd.args(curl::build_curl_args(req))
@@ -203,29 +274,24 @@ pub fn run(req: &CurlRequest, opts: &RunOptions) -> anyhow::Result<i32> {
     let stderr = child.stderr.take().expect("stderr is piped");
     let forwarder = thread::spawn(move || forward_stderr(BufReader::new(stderr), io::stderr()));
 
-    let mut response = Vec::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        stdout.read_to_end(&mut response)?;
+    if let Some(stdout) = child.stdout.take() {
+        print_response(stdout, req.include)?;
     }
 
     let status = child.wait()?;
     let meta = forwarder.join().unwrap_or_default();
     let elapsed = start.elapsed();
 
-    if mode == OutputMode::Pretty {
-        print_response(&response, req.include)?;
-    }
-
     let exit_code = status.code().unwrap_or(1);
     if !opts.silent {
         if status.success() {
-            format::print_success_footer(meta.status, elapsed);
+            format::print_success_footer(&meta, elapsed);
         } else {
-            format::print_failure_footer(meta.status, exit_code, elapsed);
+            format::print_failure_footer(&meta, exit_code, elapsed);
         }
     }
 
-    Ok(exit_code)
+    Ok(Outcome { exit_code, meta })
 }
 
 #[cfg(test)]
@@ -233,11 +299,109 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_mode_is_pretty_only_when_asked_and_printing() {
-        assert_eq!(output_mode(false, false), OutputMode::Raw);
-        assert_eq!(output_mode(true, false), OutputMode::Pretty);
-        assert_eq!(output_mode(true, true), OutputMode::Raw);
-        assert_eq!(output_mode(false, true), OutputMode::Raw);
+    fn output_mode_follows_the_terminal_by_default() {
+        use PrettyChoice::*;
+        assert_eq!(output_mode(Auto, false, true), OutputMode::Pretty);
+        assert_eq!(output_mode(Auto, false, false), OutputMode::Raw);
+        assert_eq!(output_mode(Always, false, false), OutputMode::Pretty);
+        assert_eq!(output_mode(Never, false, true), OutputMode::Raw);
+    }
+
+    #[test]
+    fn output_mode_is_raw_when_writing_to_a_file() {
+        use PrettyChoice::*;
+        for choice in [Auto, Always, Never] {
+            assert_eq!(output_mode(choice, true, true), OutputMode::Raw);
+        }
+    }
+
+    /// A reader that hands out its data in the given pieces, like a pipe
+    struct Chunked(std::collections::VecDeque<Vec<u8>>);
+
+    impl Read for Chunked {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let Some(mut piece) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            let n = piece.len().min(out.len());
+            out[..n].copy_from_slice(&piece[..n]);
+            if n < piece.len() {
+                self.0.push_front(piece.split_off(n));
+            }
+            Ok(n)
+        }
+    }
+
+    fn relay(pieces: &[&str], has_headers: bool) -> String {
+        colored::control::set_override(false);
+        let reader = Chunked(pieces.iter().map(|p| p.as_bytes().to_vec()).collect());
+        let mut out = Vec::new();
+        relay_response(reader, &mut out, has_headers).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn relay_pretty_prints_json_split_across_reads() {
+        assert_eq!(
+            relay(&["  ", "\n{\"a\"", ":1}"], false),
+            "{\n  \"a\": 1\n}\n"
+        );
+    }
+
+    #[test]
+    fn relay_passes_invalid_json_through_unchanged() {
+        assert_eq!(
+            relay(&["{\"a\":1}\n", "{\"a\":2}\n"], false),
+            "{\"a\":1}\n{\"a\":2}\n"
+        );
+    }
+
+    #[test]
+    fn relay_passes_non_json_through() {
+        assert_eq!(
+            relay(&["data: 1\n\n", "data: 2\n\n"], false),
+            "data: 1\n\ndata: 2\n\n"
+        );
+        assert_eq!(relay(&["", ""], false), "");
+        assert_eq!(relay(&["\n", " "], false), "\n ");
+    }
+
+    /// Records each write, to observe what is passed on before EOF
+    #[derive(Default)]
+    struct Recorder(Vec<Vec<u8>>);
+
+    impl Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.push(buf.to_vec());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn relay_streams_non_json_as_it_arrives() {
+        let reader = Chunked(
+            ["<html>", "<body>", "</html>"]
+                .iter()
+                .map(|p| p.as_bytes().to_vec())
+                .collect(),
+        );
+        let mut out = Recorder::default();
+        relay_response(reader, &mut out, false).unwrap();
+        assert_eq!(
+            out.0,
+            vec![b"<html>".to_vec(), b"<body>".to_vec(), b"</html>".to_vec()]
+        );
+    }
+
+    #[test]
+    fn relay_with_headers_formats_the_body() {
+        assert_eq!(
+            relay(&["HTTP/1.1 200 OK\r\nX: y\r\n\r\n", "[1]"], true),
+            "HTTP/1.1 200 OK\nX: y\n\n[\n  1\n]\n"
+        );
     }
 
     #[test]
