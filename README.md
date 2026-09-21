@@ -8,7 +8,8 @@ A simple, colorful CLI wrapper around `curl` for easier terminal usage.
 - 📄 **Request files** - Load headers and body from JSON files
 - 🔍 **Smart JSON detection** - Auto-adds `Content-Type: application/json` when sending JSON
 - 🏠 **Localhost shorthand** - Use `:3000/api` instead of `http://localhost:3000/api`
-- ⏱️ **Response timing** - See how long requests take
+- ⏱️ **Status at a glance** - `✓ HTTP 200 OK · 41ms · 1.2 KB` after every request
+- 🚦 **Script-friendly** - Only the response on stdout; `--fail` exits non-zero on HTTP errors
 - 🎯 **Method coloring** - Visual distinction between GET, POST, PUT, DELETE
 - 🔗 **Pass-through** - Send any curl flag with `--`
 
@@ -16,6 +17,14 @@ A simple, colorful CLI wrapper around `curl` for easier terminal usage.
 
 ```bash
 cargo install --path .
+```
+
+Shell completions:
+
+```bash
+gurl completions zsh  > ~/.zfunc/_gurl                            # zsh (~/.zfunc in fpath)
+gurl completions bash > ~/.local/share/bash-completion/completions/gurl
+gurl completions fish > ~/.config/fish/completions/gurl.fish
 ```
 
 ## Development
@@ -55,8 +64,8 @@ pre-commit run --all-files
 # Simple GET
 gurl https://api.example.com/users
 
-# With pretty JSON output
-gurl --pretty https://jsonplaceholder.typicode.com/posts/1
+# JSON is pretty-printed on a terminal; raw when piped
+gurl https://jsonplaceholder.typicode.com/posts/1
 
 # Localhost shorthand
 gurl :3000/api/users
@@ -150,7 +159,9 @@ gurl -H "Accept: application/json" -H "X-Custom: value" https://api.example.com
 | `-d` | `--data`         | Request body, sent as-is; `@file` or `@-` for stdin |
 | `-H` | `--header`       | Add header (repeatable; `--headers` also works)     |
 | `-f` | `--file`         | Load request from JSON file                         |
-| `-p` | `--pretty`       | Pretty print JSON with syntax highlighting          |
+| `-p` | `--pretty`       | Pretty print JSON, even when piped                  |
+|      | `--raw`          | Never reformat the response, even on a terminal     |
+|      | `--fail`         | Exit 22 on HTTP 4xx/5xx (body is still printed)     |
 | `-v` | `--verbose`      | Show the curl command, request and curl's trace     |
 | `-s` | `--silent`       | Only the response: no banner, no status             |
 | `-L` | `--location`     | Follow redirects                                    |
@@ -207,16 +218,30 @@ gurl -m POST -d '{"email":"test@example.com"}' :3000/api/register
 
 ## Output
 
-The response is the only thing written to stdout. The request banner, HTTP
-status and timing go to stderr, so piping and redirecting just work — binary
-responses included:
+The response is the only thing written to stdout. The request banner and the
+status line go to stderr, so piping and redirecting just work — binary and
+streaming responses included:
 
 ```bash
 gurl https://api.example.com/users | jq '.[0]'
 gurl https://example.com/logo.png > logo.png
 ```
 
-With `--pretty`, you get:
+After each request gurl prints the status, curl's timing and the download size:
+
+```
+✓ HTTP 201 Created · 142ms · 1.2 KB
+✗ HTTP 404 Not Found · 38ms · 21 B
+✗ Failed · 3ms (curl exit code 7)
+```
+
+An HTTP error still exits 0, as with curl. Add `--fail` to exit with 22
+instead, e.g. `gurl --fail -s :3000/health || echo down`. `-s` hides the
+banner and status line.
+
+On a terminal, JSON responses are pretty-printed (`--raw` turns that off;
+`--pretty` forces it when piping). Other content types are passed through
+untouched and streamed as they arrive. You get:
 
 - **Blue** keys in JSON objects
 - **Green** strings
@@ -224,7 +249,10 @@ With `--pretty`, you get:
 - **Yellow** booleans
 - **Magenta** null values
 - Color-coded HTTP methods (green GET, yellow POST, red DELETE, etc.)
-- Response timing
+- Status codes colored by class (2xx green, 3xx cyan, 4xx yellow, 5xx red)
+
+Keys stay in the order the server sent them. Colors follow the
+[`NO_COLOR`](https://no-color.org) / `CLICOLOR_FORCE` conventions.
 
 ## License
 

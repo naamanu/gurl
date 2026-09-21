@@ -43,8 +43,9 @@ A library crate (`src/lib.rs`) with a thin binary (`src/main.rs`): parse args �
 ### Stream contract (the invariant to preserve)
 
 - **stdout carries only the response.** Banner, status footer and errors all go to stderr, so `gurl url | jq` and `gurl url > file` just work. `-s/--silent` suppresses gurl's decorations entirely.
-- curl is always run with `-sS` and a `-w` format that starts with `%{stderr}`: response metadata (status, time, size, content type) arrives on curl's **stderr**, on a line starting with `__GURL_META__`. `exec::forward_stderr` forwards curl's stderr live (so `-v` works) and holds back only that line.
-- `exec::output_mode` picks how stdout is wired: `Raw` **inherits** our stdout (streaming, binary-safe — never decode or buffer on this path); `Pretty` pipes and buffers bytes, splits off `-i` header blocks, pretty-prints the body if it parses as JSON, and otherwise writes the bytes through untouched.
+- curl is always run with `-sSN` (`-N`: curl's stdout is never a TTY, so it would otherwise buffer the whole response) and a `-w` format that starts with `%{stderr}`: response metadata (status, time, size, content type) arrives on curl's **stderr**, on a line starting with `__GURL_META__`. `exec::forward_stderr` forwards curl's stderr live (so `-v` works) and holds back only that line.
+- `exec::output_mode(PrettyChoice, has_output_file, stdout_is_tty)` picks how stdout is wired. Pretty is the default on a terminal (`--pretty` forces it, `--raw` disables it). `Raw` **inherits** our stdout (streaming, binary-safe — never decode or buffer on this path). `Pretty` pipes through `exec::relay_response`: a body whose first non-space byte is `{` or `[` is buffered and pretty-printed if it parses (else written back untouched); anything else is streamed through as it arrives. With `-i` the whole response is buffered so header blocks can be split off.
+- `exec::run` returns an `Outcome { exit_code, meta }`; `main` maps it to the process exit code (`--fail` → 22 on HTTP ≥ 400).
 
 ## Testing
 

@@ -107,8 +107,7 @@ fn stdout_is_exactly_the_response_body() {
         .success()
         .stdout(JSON_BODY)
         .stderr(predicate::str::contains("GET"))
-        .stderr(predicate::str::contains("200"))
-        .stderr(predicate::str::contains("Response received"))
+        .stderr(predicate::str::is_match(r"✓ HTTP 200 OK · [0-9.]+m?s · 15 B\n$").unwrap())
         .stderr(no_meta_leak());
 }
 
@@ -162,8 +161,48 @@ fn error_status_is_reported_on_stderr() {
         .assert()
         .success()
         .stdout(NOT_FOUND_BODY)
-        .stderr(predicate::str::contains("404"))
-        .stderr(predicate::str::contains("Error response received"));
+        .stderr(predicate::str::contains("✗ HTTP 404 Not Found"));
+}
+
+#[test]
+fn fail_exits_22_on_http_errors_and_still_prints_the_body() {
+    let server = TestServer::start();
+    gurl()
+        .args(["--fail", &server.url("/missing")])
+        .assert()
+        .code(22)
+        .stdout(NOT_FOUND_BODY);
+}
+
+#[test]
+fn fail_exits_zero_on_success() {
+    let server = TestServer::start();
+    gurl()
+        .args(["--fail", "-s", &server.url("/json")])
+        .assert()
+        .success();
+}
+
+#[test]
+fn raw_is_accepted_and_leaves_json_alone() {
+    let server = TestServer::start();
+    gurl()
+        .args(["--raw", &server.url("/json")])
+        .assert()
+        .success()
+        .stdout(JSON_BODY);
+}
+
+#[test]
+fn completions_are_generated() {
+    for shell in ["bash", "zsh", "fish"] {
+        gurl()
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("gurl"))
+            .stdout(predicate::str::contains("dry-run"));
+    }
 }
 
 #[test]

@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -7,19 +8,45 @@ use std::path::PathBuf;
     version,
     about = "A simple curl wrapper for easier terminal usage",
     long_about = None,
+    // `gurl <url>` unless the first word is a subcommand
+    args_conflicts_with_subcommands = true,
     after_help = "\
 Examples:
   gurl https://api.example.com/users          GET request (default)
   gurl :8080/health                            Localhost shorthand
   gurl -m POST -d '{\"name\":\"foo\"}' :3000/api  POST with JSON body
   gurl -f request.json                         Load request from file
-  gurl --pretty https://api.example.com/data   Pretty-print JSON response
+  gurl --fail :3000/health && echo up          Exit non-zero on HTTP 4xx/5xx
   gurl -H 'Authorization: Bearer tok' api.com  Custom header
   gurl -L -t 30 https://example.com            Follow redirects, 30s timeout
   gurl -s https://api.example.com | jq .       Only the response, for scripts
   gurl --dry-run -d @body.json :3000/api       Show the curl command, don't run it
-  gurl https://example.com -- -k --compressed  Pass extra args to curl"
+  gurl https://example.com -- -k --compressed  Pass extra args to curl
+
+JSON responses are pretty-printed when stdout is a terminal; use --raw to
+turn that off, or --pretty to force it when piping."
 )]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    #[command(flatten)]
+    pub args: Args,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Print a shell completion script
+    ///
+    /// e.g. `gurl completions zsh > ~/.zfunc/_gurl`,
+    /// `gurl completions fish > ~/.config/fish/completions/gurl.fish`
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+
+#[derive(clap::Args, Debug)]
 pub struct Args {
     /// The URL to request (use :port/path as shorthand for localhost)
     /// Can be omitted if using --file with url field
@@ -70,9 +97,18 @@ pub struct Args {
     #[arg(short, long)]
     pub user: Option<String>,
 
-    /// Pretty print JSON output with syntax highlighting
-    #[arg(short, long)]
+    /// Pretty print JSON output with syntax highlighting, even when piped
+    #[arg(short, long, conflicts_with = "raw")]
     pub pretty: bool,
+
+    /// Print the response exactly as received, even on a terminal
+    #[arg(long)]
+    pub raw: bool,
+
+    /// Exit with code 22 when the server answers with HTTP 4xx or 5xx
+    /// (the response is still printed)
+    #[arg(long)]
+    pub fail: bool,
 
     /// Print the equivalent curl command instead of running it
     #[arg(long)]
@@ -92,8 +128,34 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    fn parse(argv: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("gurl").chain(argv.iter().copied())).unwrap()
+    }
+
     #[test]
     fn cli_definition_is_valid() {
-        Args::command().debug_assert();
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn url_without_subcommand() {
+        let cli = parse(&["-L", "example.com", "--", "-k"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.args.url.as_deref(), Some("example.com"));
+        assert_eq!(cli.args.extra_args, vec!["-k"]);
+    }
+
+    #[test]
+    fn completions_subcommand() {
+        let cli = parse(&["completions", "fish"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completions { shell: Shell::Fish })
+        ));
+    }
+
+    #[test]
+    fn pretty_and_raw_conflict() {
+        assert!(Cli::try_parse_from(["gurl", "--pretty", "--raw", "x"]).is_err());
     }
 }
