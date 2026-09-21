@@ -29,14 +29,15 @@ pre-commit run --all-files   # Manual run
 
 ## Architecture
 
-A library crate (`src/lib.rs`) with a thin binary (`src/main.rs`): parse args → load request file and substitute variables → `request::resolve` → print banner → `exec::run` → exit code.
+A library crate (`src/lib.rs`) with a thin binary (`src/main.rs`): parse args → load a request file (`-f`) or a collection's request (`run`) → substitute variables → `request::resolve` → print banner → `exec::run` → exit code.
 
 | Module | Responsibility |
 | --- | --- |
-| `args.rs` | clap definitions only: `Cli { command: Option<Command>, args: Args }` with `args_conflicts_with_subcommands`, so `gurl <url>` and `gurl completions zsh` coexist |
+| `args.rs` | clap definitions only: `Cli { command: Option<Command>, args: Args }` with `args_conflicts_with_subcommands`, so `gurl <url>`, `gurl run ...` and `gurl completions zsh` coexist. Side effect: options before a subcommand turn subcommands off, which `main` detects and reports |
 | `request.rs` | `RequestFile` / `HeadersFormat` serde types, `load_request_file`, `split_targets` (positional `[METHOD] URL [ITEM]...`), and `resolve(args, file) -> CurlRequest` — a pure function holding all CLI-vs-file merge rules (CLI wins; headers go file → `--bearer` → `-H` → items; JSON bodies get a `Content-Type` unless one is set) |
 | `url.rs` | `expand_url` (`:3000/x` → `http://localhost:3000/x`, bare host → `https://`), `append_query`, `percent_encode` |
 | `items.rs` | httpie-style request items (`Name:v`, `n==v`, `n=v`, `n:=json`, `n=@file`, `n:=@file`, `n@file`): `parse_item` (earliest separator wins, ties go to the longest) and `build` → headers, query, JSON / urlencoded / multipart body |
+| `collection.rs` | `gurl run`: `Collection { vars, defaults, requests }`. Requests stay raw `Value`s in file order and are parsed one at a time (`request(name)` merges default headers first; `summaries()` for the listing) |
 | `vars.rs` | `{{NAME}}` substitution (`Vars`, precedence `--var` > env > `--env-file` > collection defaults) and the `.env` parser. Applied to request files only, on parsed JSON (`RequestFile::substitute`) |
 | `curl.rs` | `CurlRequest`, `Body` (`Raw` → `--data-raw`, `File` → `--data-binary @path`, `Multipart` → `--form-string` / `-F name=@path`) and `build_curl_args` (pure, order matters: extra args go last before the URL so the user can override anything). `-X` is only passed when curl wouldn't infer the method; `HEAD` becomes `-I`. `display_command` is the shell-quoted command minus gurl's own plumbing; always pass it `req.masked()` unless `--show-secrets` |
 | `exec.rs` | Spawns curl, plumbs its streams, returns the exit code. Never calls `process::exit` |
@@ -59,3 +60,7 @@ Rust edition 2024 is used, which enables `let` chains (`if let Some(..) = x && c
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`): fmt + clippy, the full test suite on Linux, macOS and Windows, and `cargo check` on the minimum Rust version (`rust-version` in Cargo.toml, 1.88).
+
+## Releasing
+
+Bump `version` in `Cargo.toml`, add a `CHANGELOG.md` entry, and push a `vX.Y.Z` tag. `.github/workflows/release.yml` checks the tag matches `Cargo.toml`, builds Linux/macOS/Windows binaries, and publishes a GitHub release with `gh`.
