@@ -69,9 +69,20 @@ gurl :8080/health
 # POST with JSON (Content-Type auto-detected)
 gurl -m POST -d '{"name":"John"}' https://api.example.com/users
 
+# Sending data implies POST, as with curl
+gurl -d '{"name":"John"}' https://api.example.com/users
+
 # With pretty output and verbose mode
 gurl --pretty -v -m POST -d '{"title":"Hello"}' https://api.example.com/posts
+
+# Send a file (Content-Type set for .json), or stdin with @-
+gurl -d @payload.json https://api.example.com/users
+jq -n '{name: "John"}' | gurl -d @- https://api.example.com/users
 ```
+
+`-d` sends its value exactly as written (curl's `--data-raw`). Only a leading
+`@` reads a file, and the file is sent byte for byte. A `body` in a request
+file is always sent as written, even if it starts with `@`.
 
 ### Request Files
 
@@ -105,7 +116,8 @@ gurl --file request.json -m PUT
 }
 ```
 
-Headers can also be an array:
+Headers are sent in the order written. A `null` value (`"Accept": null`)
+removes a header curl would otherwise add. Headers can also be an array:
 
 ```json
 {
@@ -132,20 +144,36 @@ gurl -H "Accept: application/json" -H "X-Custom: value" https://api.example.com
 
 ### Options
 
-| Flag | Long         | Description                                 |
-| ---- | ------------ | ------------------------------------------- |
-| `-m` | `--method`   | HTTP method (GET, POST, PUT, DELETE, PATCH) |
-| `-d` | `--data`     | Request body (JSON auto-detected)           |
-| `-H` | `--headers`  | Add header (repeatable)                     |
-| `-f` | `--file`     | Load request from JSON file                 |
-| `-p` | `--pretty`   | Pretty print JSON with syntax highlighting  |
-| `-v` | `--verbose`  | Show full curl command and request details  |
-| `-s` | `--silent`   | Only the response: no banner, no status     |
-| `-L` | `--location` | Follow redirects                            |
-| `-t` | `--timeout`  | Request timeout in seconds                  |
-| `-o` | `--output`   | Save response to file                       |
-| `-u` | `--user`     | Basic auth (user:password)                  |
-| `-i` | `--include`  | Include response headers                    |
+| Flag | Long             | Description                                         |
+| ---- | ---------------- | --------------------------------------------------- |
+| `-m` | `--method`       | HTTP method (default GET, or POST when sending data) |
+| `-d` | `--data`         | Request body, sent as-is; `@file` or `@-` for stdin |
+| `-H` | `--header`       | Add header (repeatable; `--headers` also works)     |
+| `-f` | `--file`         | Load request from JSON file                         |
+| `-p` | `--pretty`       | Pretty print JSON with syntax highlighting          |
+| `-v` | `--verbose`      | Show the curl command, request and curl's trace     |
+| `-s` | `--silent`       | Only the response: no banner, no status             |
+| `-L` | `--location`     | Follow redirects                                    |
+| `-t` | `--timeout`      | Request timeout in seconds                          |
+| `-o` | `--output`       | Save response to file                               |
+| `-u` | `--user`         | Basic auth (user:password)                          |
+| `-i` | `--include`      | Include response headers                            |
+|      | `--dry-run`      | Print the equivalent curl command; send nothing     |
+|      | `--show-secrets` | Don't mask credentials in `-v` / `--dry-run` output |
+
+URLs without a scheme get `https://`, except local hosts (`localhost`,
+`127.x.x.x`, `[::1]`, `*.localhost`), which get `http://`.
+
+### See the curl command
+
+`--dry-run` prints the curl command gurl would run, quoted so it can be pasted
+into a shell or a bug report. `Authorization` headers and `-u` passwords are
+shown as `***` unless you add `--show-secrets`.
+
+```bash
+$ gurl --dry-run -H 'Authorization: Bearer abc' -d '{"a":1}' :3000/items
+curl -H 'Authorization: ***' -H 'Content-Type: application/json' --data-raw '{"a":1}' http://localhost:3000/items
+```
 
 ### Pass-through to curl
 

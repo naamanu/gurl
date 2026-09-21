@@ -1,13 +1,21 @@
 /// Marks the line on curl's stderr that carries response metadata for gurl.
 pub const META_SENTINEL: &str = "__GURL_META__";
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Body {
+    /// Sent exactly as given (`--data-raw`): no `@file` expansion
+    Raw(String),
+    /// Contents of a file, or stdin for `-`, sent byte for byte (`--data-binary @path`)
+    File(String),
+}
+
 /// Everything that determines the curl invocation.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CurlRequest {
     pub method: String,
     pub url: String,
     pub headers: Vec<String>,
-    pub body: Option<String>,
+    pub body: Option<Body>,
     pub verbose: bool,
     pub include: bool,
     pub location: bool,
@@ -37,20 +45,77 @@ pub fn display_curl_args(req: &CurlRequest) -> Vec<String> {
     build(req, false)
 }
 
+const MASK: &str = "***";
+
+impl CurlRequest {
+    /// A copy that is safe to show on screen: credentials replaced by `***`.
+    pub fn masked(&self) -> CurlRequest {
+        let mut masked = self.clone();
+        for header in &mut masked.headers {
+            if let Some((name, _)) = header.split_once(':')
+                && ["authorization", "proxy-authorization"]
+                    .contains(&name.trim().to_lowercase().as_str())
+            {
+                *header = format!("{name}: {MASK}");
+            }
+        }
+        if let Some(user) = &mut masked.user
+            && let Some((name, _)) = user.split_once(':')
+        {
+            *user = format!("{name}:{MASK}");
+        }
+        masked
+    }
+}
+
+/// Quote `arg` for a POSIX shell, only when needed.
+pub fn shell_quote(arg: &str) -> String {
+    let is_safe = |c: char| c.is_ascii_alphanumeric() || "_-./:=@%+,".contains(c);
+    if !arg.is_empty() && arg.chars().all(is_safe) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// The equivalent curl command line, ready to paste into a shell.
+pub fn display_command(req: &CurlRequest) -> String {
+    std::iter::once("curl".to_string())
+        .chain(display_curl_args(req).iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn build(req: &CurlRequest, plumbing: bool) -> Vec<String> {
     let mut args = Vec::new();
 
-    args.push("-X".into());
-    args.push(req.method.clone());
+    // Let curl infer the method where it can: a forced -X is also applied to
+    // every request of a redirect chain followed with -L.
+    match (req.method.as_str(), req.body.is_some()) {
+        ("GET", false) | ("POST", true) => {}
+        // -X HEAD would make curl wait for a body that never comes
+        ("HEAD", false) => args.push("-I".into()),
+        _ => {
+            args.push("-X".into());
+            args.push(req.method.clone());
+        }
+    }
 
     for header in &req.headers {
         args.push("-H".into());
         args.push(header.clone());
     }
 
-    if let Some(ref data) = req.body {
-        args.push("-d".into());
-        args.push(data.clone());
+    match &req.body {
+        Some(Body::Raw(data)) => {
+            args.push("--data-raw".into());
+            args.push(data.clone());
+        }
+        Some(Body::File(path)) => {
+            args.push("--data-binary".into());
+            args.push(format!("@{path}"));
+        }
+        None => {}
     }
 
     if req.verbose {
@@ -115,7 +180,7 @@ mod tests {
         let meta = meta_write_out();
         assert_eq!(
             strs(&build_curl_args(&req)),
-            vec!["-X", "GET", "-sS", "-w", &meta, "https://example.com"]
+            vec!["-sS", "-w", &meta, "https://example.com"]
         );
     }
 
@@ -125,20 +190,18 @@ mod tests {
             method: "POST".into(),
             url: "https://example.com/api".into(),
             headers: vec!["Content-Type: application/json".into(), "X-A: 1".into()],
-            body: Some(r#"{"key":"value"}"#.into()),
+            body: Some(Body::Raw(r#"{"key":"value"}"#.into())),
             ..Default::default()
         };
         let meta = meta_write_out();
         assert_eq!(
             strs(&build_curl_args(&req)),
             vec![
-                "-X",
-                "POST",
                 "-H",
                 "Content-Type: application/json",
                 "-H",
                 "X-A: 1",
-                "-d",
+                "--data-raw",
                 r#"{"key":"value"}"#,
                 "-sS",
                 "-w",
@@ -166,8 +229,6 @@ mod tests {
         assert_eq!(
             strs(&build_curl_args(&req)),
             vec![
-                "-X",
-                "GET",
                 "-v",
                 "-i",
                 "-sS",
@@ -220,6 +281,114 @@ mod tests {
             strs(&display_curl_args(&req)),
             vec!["-X", "DELETE", "-L", "-k", "https://example.com/1"]
         );
+    }
+
+    fn method_args(method: &str, body: Option<Body>) -> Vec<String> {
+        let req = CurlRequest {
+            method: method.into(),
+            url: "u".into(),
+            body,
+            ..Default::default()
+        };
+        display_curl_args(&req)
+            .into_iter()
+            .filter(|a| a != "u" && a != "--data-raw" && a != "x")
+            .collect()
+    }
+
+    #[test]
+    fn method_is_only_forced_when_curl_would_pick_another() {
+        let body = || Some(Body::Raw("x".into()));
+        assert!(method_args("GET", None).is_empty());
+        assert!(method_args("POST", body()).is_empty());
+        assert_eq!(method_args("HEAD", None), vec!["-I"]);
+        assert_eq!(method_args("POST", None), vec!["-X", "POST"]);
+        assert_eq!(method_args("GET", body()), vec!["-X", "GET"]);
+        assert_eq!(method_args("PUT", body()), vec!["-X", "PUT"]);
+        assert_eq!(method_args("DELETE", None), vec!["-X", "DELETE"]);
+        assert_eq!(method_args("HEAD", body()), vec!["-X", "HEAD"]);
+    }
+
+    #[test]
+    fn file_body_uses_data_binary() {
+        let req = CurlRequest {
+            method: "POST".into(),
+            url: "u".into(),
+            body: Some(Body::File("big.json".into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            strs(&display_curl_args(&req)),
+            vec!["--data-binary", "@big.json", "u"]
+        );
+    }
+
+    #[test]
+    fn shell_quote_leaves_plain_words_alone() {
+        assert_eq!(shell_quote("-X"), "-X");
+        assert_eq!(
+            shell_quote("https://example.com/a?b=1"),
+            "'https://example.com/a?b=1'"
+        );
+        assert_eq!(
+            shell_quote("https://example.com/a"),
+            "https://example.com/a"
+        );
+        assert_eq!(shell_quote("@file.json"), "@file.json");
+    }
+
+    #[test]
+    fn shell_quote_wraps_special_characters() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("X-A: 1"), "'X-A: 1'");
+        assert_eq!(shell_quote(r#"{"a":"b"}"#), r#"'{"a":"b"}'"#);
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+    }
+
+    #[test]
+    fn display_command_is_copy_pasteable() {
+        let req = CurlRequest {
+            method: "PUT".into(),
+            url: "https://example.com/users/1".into(),
+            headers: vec!["Content-Type: application/json".into()],
+            body: Some(Body::Raw(r#"{"name":"O'Brien"}"#.into())),
+            ..Default::default()
+        };
+        assert_eq!(
+            display_command(&req),
+            r#"curl -X PUT -H 'Content-Type: application/json' --data-raw '{"name":"O'\''Brien"}' https://example.com/users/1"#
+        );
+    }
+
+    #[test]
+    fn masked_hides_credentials_only() {
+        let req = CurlRequest {
+            headers: vec![
+                "Authorization: Bearer secret".into(),
+                "proxy-authorization: Basic abc".into(),
+                "X-Authorization-Hint: visible".into(),
+            ],
+            user: Some("admin:hunter2".into()),
+            ..Default::default()
+        };
+        let masked = req.masked();
+        assert_eq!(
+            masked.headers,
+            vec![
+                "Authorization: ***",
+                "proxy-authorization: ***",
+                "X-Authorization-Hint: visible"
+            ]
+        );
+        assert_eq!(masked.user.as_deref(), Some("admin:***"));
+
+        // A user without a password makes curl prompt for it: nothing to hide
+        let prompt = CurlRequest {
+            user: Some("admin".into()),
+            ..Default::default()
+        };
+        assert_eq!(prompt.masked().user.as_deref(), Some("admin"));
     }
 
     #[test]

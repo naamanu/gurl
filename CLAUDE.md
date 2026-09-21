@@ -36,7 +36,7 @@ A library crate (`src/lib.rs`) with a thin binary (`src/main.rs`): parse args �
 | `args.rs` | clap `Args` definition only |
 | `request.rs` | `RequestFile` / `HeadersFormat` serde types, `load_request_file`, and `resolve(args, file) -> CurlRequest` — a pure function holding all CLI-vs-file merge rules (CLI wins; file headers precede CLI headers; JSON bodies get a `Content-Type` unless one is set) |
 | `url.rs` | `expand_url` (`:3000/x` → `http://localhost:3000/x`, bare host → `https://`) |
-| `curl.rs` | `CurlRequest` and `build_curl_args` (pure, order matters: extra args go last before the URL so the user can override anything). `display_curl_args` is the same minus gurl's own plumbing |
+| `curl.rs` | `CurlRequest`, `Body` (`Raw` → `--data-raw`, `File` → `--data-binary @path`) and `build_curl_args` (pure, order matters: extra args go last before the URL so the user can override anything). `-X` is only passed when curl wouldn't infer the method; `HEAD` becomes `-I`. `display_command` is the shell-quoted command minus gurl's own plumbing; always pass it `req.masked()` unless `--show-secrets` |
 | `exec.rs` | Spawns curl, plumbs its streams, returns the exit code. Never calls `process::exit` |
 | `format.rs` | Banner, status footer, response-header coloring, JSON pretty-printer |
 

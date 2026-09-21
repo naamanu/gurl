@@ -1,10 +1,9 @@
 use crate::args::Args;
-use crate::curl::CurlRequest;
+use crate::curl::{Body, CurlRequest};
 use crate::url::expand_url;
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{Map, Value};
 use std::fs;
 use std::path::Path;
 
@@ -25,8 +24,9 @@ pub enum HeadersFormat {
     None,
     /// Array of "Key: Value" strings
     Array(Vec<String>),
-    /// Object { "Key": "Value" }
-    Object(HashMap<String, String>),
+    /// Object { "Key": "Value" }, sent in the order written. A `null` value
+    /// becomes `Key:`, which tells curl to drop one of its default headers.
+    Object(Map<String, Value>),
 }
 
 impl HeadersFormat {
@@ -34,7 +34,14 @@ impl HeadersFormat {
         match self {
             HeadersFormat::None => vec![],
             HeadersFormat::Array(arr) => arr.clone(),
-            HeadersFormat::Object(obj) => obj.iter().map(|(k, v)| format!("{k}: {v}")).collect(),
+            HeadersFormat::Object(obj) => obj
+                .iter()
+                .map(|(name, value)| match value {
+                    Value::Null => format!("{name}:"),
+                    Value::String(s) => format!("{name}: {s}"),
+                    other => format!("{name}: {other}"),
+                })
+                .collect(),
         }
     }
 }
@@ -56,9 +63,10 @@ pub fn looks_like_json(data: &str) -> bool {
 }
 
 pub fn has_content_type_header(headers: &[String]) -> bool {
-    headers
-        .iter()
-        .any(|h| h.to_lowercase().starts_with("content-type"))
+    headers.iter().any(|h| {
+        h.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("content-type"))
+    })
 }
 
 /// Merge CLI arguments with an optional request file into the request to send.
@@ -71,29 +79,40 @@ pub fn resolve(args: &Args, file: Option<&RequestFile>) -> anyhow::Result<CurlRe
         .ok_or_else(|| anyhow::anyhow!("URL is required (provide as argument or in --file)"))?;
     let url = expand_url(&url);
 
+    let mut headers: Vec<String> = file.map(|r| r.headers.to_vec()).unwrap_or_default();
+    headers.extend(args.headers.iter().cloned());
+
+    // Only an explicit `-d @path` reads a file, as with curl. A body from a
+    // request file is always sent as written, even if it starts with '@'.
+    let body = match &args.data {
+        Some(data) => Some(match data.strip_prefix('@') {
+            Some(path) => Body::File(path.to_string()),
+            None => Body::Raw(data.clone()),
+        }),
+        None => file.and_then(|r| r.body.as_ref()).map(|b| {
+            Body::Raw(
+                b.as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| serde_json::to_string(b).unwrap_or_default()),
+            )
+        }),
+    };
+
+    // Like curl: sending data means POST unless told otherwise
     let method = args
         .method
         .clone()
         .or_else(|| file.and_then(|r| r.method.clone()))
-        .unwrap_or_else(|| "GET".to_string())
+        .unwrap_or_else(|| if body.is_some() { "POST" } else { "GET" }.to_string())
         .to_uppercase();
 
-    let mut headers: Vec<String> = file.map(|r| r.headers.to_vec()).unwrap_or_default();
-    headers.extend(args.headers.iter().cloned());
-
-    let body: Option<String> = args.data.clone().or_else(|| {
-        file.and_then(|r| r.body.as_ref()).map(|b| {
-            b.as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| serde_json::to_string(b).unwrap_or_default())
-        })
-    });
-
     // Auto-detect JSON and add Content-Type if missing
-    if let Some(ref data) = body
-        && looks_like_json(data)
-        && !has_content_type_header(&headers)
-    {
+    let is_json = match &body {
+        Some(Body::Raw(data)) => looks_like_json(data),
+        Some(Body::File(path)) => path.to_lowercase().ends_with(".json"),
+        None => false,
+    };
+    if is_json && !has_content_type_header(&headers) {
         headers.push("Content-Type: application/json".to_string());
     }
 
@@ -261,7 +280,7 @@ mod tests {
         let req = resolve(&args(&[]), Some(&rf)).unwrap();
         assert_eq!(req.method, "POST");
         assert_eq!(req.url, "https://example.com/api");
-        assert_eq!(req.body.as_deref(), Some(r#"{"k":"v"}"#));
+        assert_eq!(req.body, Some(Body::Raw(r#"{"k":"v"}"#.into())));
         assert_eq!(
             req.headers,
             vec!["X-A: 1", "Content-Type: application/json"]
@@ -278,7 +297,7 @@ mod tests {
         .unwrap();
         assert_eq!(req.method, "PUT");
         assert_eq!(req.url, "https://cli.test");
-        assert_eq!(req.body.as_deref(), Some("from cli"));
+        assert_eq!(req.body, Some(Body::Raw("from cli".into())));
     }
 
     #[test]
@@ -292,7 +311,7 @@ mod tests {
     fn resolve_string_body_is_sent_verbatim() {
         let rf = file(r#"{"url": "https://x.test", "body": "plain text"}"#);
         let req = resolve(&args(&[]), Some(&rf)).unwrap();
-        assert_eq!(req.body.as_deref(), Some("plain text"));
+        assert_eq!(req.body, Some(Body::Raw("plain text".into())));
         assert!(req.headers.is_empty());
     }
 
@@ -310,6 +329,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(req.headers, vec!["content-type: application/vnd.api+json"]);
+    }
+
+    #[test]
+    fn headers_object_keeps_order_and_accepts_scalars() {
+        let hf: HeadersFormat = serde_json::from_str(
+            r#"{"Z-First": "1", "A-Second": 2, "M-Third": true, "Accept": null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            hf.to_vec(),
+            vec!["Z-First: 1", "A-Second: 2", "M-Third: true", "Accept:"]
+        );
+    }
+
+    #[test]
+    fn content_type_match_is_on_header_name_only() {
+        assert!(!has_content_type_header(&[
+            "Content-Type-Options: nosniff".to_string()
+        ]));
+        assert!(has_content_type_header(&[
+            "  Content-Type : text/plain".to_string()
+        ]));
+    }
+
+    #[test]
+    fn resolve_data_implies_post() {
+        let req = resolve(&args(&["-d", "x=1", "https://x.test"]), None).unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.body, Some(Body::Raw("x=1".into())));
+        assert!(req.headers.is_empty());
+    }
+
+    #[test]
+    fn resolve_at_prefix_on_cli_reads_a_file() {
+        let req = resolve(&args(&["-d", "@payload.json", "https://x.test"]), None).unwrap();
+        assert_eq!(req.body, Some(Body::File("payload.json".into())));
+        assert_eq!(req.headers, vec!["Content-Type: application/json"]);
+
+        let req = resolve(&args(&["-d", "@-", "https://x.test"]), None).unwrap();
+        assert_eq!(req.body, Some(Body::File("-".into())));
+        assert!(req.headers.is_empty());
+    }
+
+    #[test]
+    fn resolve_at_prefix_in_file_body_is_literal() {
+        let rf = file(r#"{"url": "https://x.test", "body": "@/etc/passwd"}"#);
+        let req = resolve(&args(&[]), Some(&rf)).unwrap();
+        assert_eq!(req.body, Some(Body::Raw("@/etc/passwd".into())));
     }
 
     #[test]
