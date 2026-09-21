@@ -2,8 +2,12 @@
 name = "gurl"
 version = "0.2.0"
 edition = "2024"
+# let chains
+rust-version = "1.88"
 description = "A simple CLI wrapper around curl for easier terminal usage"
 license = "MIT"
+repository = "https://github.com/naamanu/gurl"
+readme = "README.md"
 keywords = ["curl", "http", "cli", "api"]
 categories = ["command-line-utilities"]
 
@@ -18,3 +22,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
