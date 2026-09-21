@@ -641,3 +641,150 @@ fn items_extend_a_request_file() {
         .stdout(predicate::str::starts_with("PUT /echo-headers "))
         .stdout(predicate::str::contains("\r\nX-Extra: 1\r\n"));
 }
+
+fn collection_file(server: &TestServer) -> tempfile::NamedTempFile {
+    request_file(&format!(
+        r#"{{
+            "vars": {{"base": "{}", "who": "default"}},
+            "defaults": {{"headers": {{"X-Default": "1"}}}},
+            "requests": {{
+                "hello": {{"description": "Say hi", "url": "{{{{base}}}}/echo-headers"}},
+                "create": {{"method": "PUT", "url": "{{{{base}}}}/echo", "body": {{"who": "{{{{who}}}}"}}}},
+                "needs-token": {{"url": "{{{{base}}}}/echo", "headers": ["Authorization: Bearer {{{{GURL_TEST_TOKEN}}}}"]}}
+            }}
+        }}"#,
+        server.url("")
+    ))
+}
+
+#[test]
+fn run_lists_requests() {
+    let server = TestServer::start();
+    let coll = collection_file(&server);
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .assert()
+        .success()
+        .stdout(concat!(
+            "hello        GET  {{base}}/echo-headers  Say hi\n",
+            "create       PUT  {{base}}/echo\n",
+            "needs-token  GET  {{base}}/echo\n",
+        ));
+}
+
+#[test]
+fn run_sends_the_named_request_with_default_headers() {
+    let server = TestServer::start();
+    let coll = collection_file(&server);
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .args(["hello", "X-Extra:2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("GET /echo-headers "))
+        .stdout(predicate::str::contains("\r\nX-Default: 1\r\n"))
+        .stdout(predicate::str::contains("\r\nX-Extra: 2\r\n"))
+        .stderr(predicate::str::contains("› hello"));
+}
+
+#[test]
+fn run_collection_vars_are_the_lowest_precedence() {
+    let server = TestServer::start();
+    let coll = collection_file(&server);
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .args(["create", "-s"])
+        .assert()
+        .success()
+        .stdout(r#"{"who":"default"}"#);
+
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .args(["create", "-s", "--var", "who=cli"])
+        .assert()
+        .success()
+        .stdout(r#"{"who":"cli"}"#);
+}
+
+#[test]
+fn run_items_replace_the_body() {
+    let server = TestServer::start();
+    let coll = collection_file(&server);
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .args(["create", "-s", "who=items"])
+        .assert()
+        .success()
+        .stdout(r#"{"who":"items"}"#);
+}
+
+#[test]
+fn run_unknown_request_lists_names() {
+    let server = TestServer::start();
+    let coll = collection_file(&server);
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .arg("nope")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "No request named `nope`. Available: hello, create, needs-token",
+        ));
+}
+
+#[test]
+fn run_undefined_variable_names_the_request() {
+    let server = TestServer::start();
+    let coll = collection_file(&server);
+    gurl()
+        .arg("run")
+        .arg(coll.path())
+        .arg("needs-token")
+        .env_remove("GURL_TEST_TOKEN")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "In request `needs-token` of collection",
+        ))
+        .stderr(predicate::str::contains(
+            "Undefined variable `GURL_TEST_TOKEN`",
+        ));
+}
+
+#[test]
+fn run_rejects_file_flag() {
+    gurl()
+        .args(["run", "x.json", "a", "-f", "y.json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--file can't be used with `gurl run`",
+        ));
+}
+
+#[test]
+fn example_collection_works_in_dry_run() {
+    gurl()
+        .args(["run", "examples/collection.json", "get-post", "--dry-run", "--var", "ID=3"])
+        .env("TOKEN", "t")
+        .assert()
+        .success()
+        .stdout(
+            "curl -H 'Authorization: ***' -H 'X-Client: gurl' https://jsonplaceholder.typicode.com/posts/3\n",
+        );
+}
+
+#[test]
+fn options_before_a_subcommand_get_a_hint() {
+    gurl()
+        .args(["-s", "run", "api.json", "login"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Put options after the subcommand"));
+}

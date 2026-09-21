@@ -17,6 +17,8 @@ pub struct RequestFile {
     #[serde(default)]
     pub headers: HeadersFormat,
     pub body: Option<Value>,
+    /// Shown by `gurl run <collection>`; not sent
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -77,6 +79,7 @@ impl RequestFile {
                 .as_ref()
                 .map(|b| substitute_value(b, vars))
                 .transpose()?,
+            description: self.description.clone(),
         })
     }
 }

@@ -1,0 +1,38 @@
+{
+  "vars": {
+    "base": "https://jsonplaceholder.typicode.com"
+  },
+  "defaults": {
+    "headers": {
+      "Authorization": "Bearer {{TOKEN}}",
+      "X-Client": "gurl"
+    }
+  },
+  "requests": {
+    "list-posts": {
+      "description": "First page of posts",
+      "url": "{{base}}/posts?_limit=5"
+    },
+    "get-post": {
+      "description": "One post; pick it with --var ID=3",
+      "url": "{{base}}/posts/{{ID}}"
+    },
+    "create-post": {
+      "description": "Create a post; add fields with title=...",
+      "method": "POST",
+      "url": "{{base}}/posts",
+      "body": {
+        "title": "Hello from a gurl collection",
+        "body": "Sent with gurl run",
+        "userId": 1
+      }
+    },
+    "delete-post": {
+      "method": "DELETE",
+      "url": "{{base}}/posts/{{ID}}",
+      "headers": {
+        "X-Client": null
+      }
+    }
+  }
+}

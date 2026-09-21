@@ -1,4 +1,5 @@
 pub mod args;
+pub mod collection;
 pub mod curl;
 pub mod exec;
 pub mod format;

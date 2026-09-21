@@ -19,6 +19,8 @@ Examples:
   gurl :3000/search q==rust X-Api-Key:abc      Query parameter and header
   gurl --form :3000/upload title=Hi doc@a.pdf  Multipart file upload
   gurl -f request.json --var TOKEN=abc         Request file with {{TOKEN}}
+  gurl run api.json                            List a collection's requests
+  gurl run api.json create name=Jo             Run one, adding a body field
   gurl --fail :3000/health && echo up          Exit non-zero on HTTP 4xx/5xx
   gurl --bearer \"$TOKEN\" api.example.com/me    Bearer token
   gurl -L -t 30 https://example.com            Follow redirects, 30s timeout
@@ -47,6 +49,26 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Run a named request from a collection, or list them
+    ///
+    /// A collection is a JSON file of named requests:
+    /// {"vars": {...}, "defaults": {"headers": {...}}, "requests": {"name": {...}}}.
+    /// Each request has the same fields as a --file request file. Request
+    /// items and flags after the name are applied on top, as with --file.
+    #[command(
+        after_help = "Examples:\n  gurl run api.json                  List requests\n  gurl run api.json login            Run `login`\n  gurl run api.json get-user id==7   Add a query parameter\n  TOKEN=abc gurl run api.json me     Set a {{TOKEN}} variable"
+    )]
+    Run {
+        /// The collection file
+        collection: PathBuf,
+
+        /// The request to run; leave out to list them
+        name: Option<String>,
+
+        #[command(flatten)]
+        args: Box<Args>,
+    },
+
     /// Print a shell completion script
     ///
     /// e.g. `gurl completions zsh > ~/.zfunc/_gurl`,
@@ -183,6 +205,30 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.args.targets, vec!["POST", "example.com", "a=1"]);
         assert_eq!(cli.args.extra_args, vec!["-k"]);
+    }
+
+    #[test]
+    fn run_subcommand_takes_name_items_and_flags() {
+        let cli = parse(&["run", "api.json", "login", "-v", "user=jo", "--", "-k"]);
+        let Some(Command::Run {
+            collection,
+            name,
+            args,
+        }) = cli.command
+        else {
+            panic!("expected run");
+        };
+        assert_eq!(collection, PathBuf::from("api.json"));
+        assert_eq!(name.as_deref(), Some("login"));
+        assert!(args.verbose);
+        assert_eq!(args.targets, vec!["user=jo"]);
+        assert_eq!(args.extra_args, vec!["-k"]);
+    }
+
+    #[test]
+    fn run_without_a_name_lists() {
+        let cli = parse(&["run", "api.json"]);
+        assert!(matches!(cli.command, Some(Command::Run { name: None, .. })));
     }
 
     #[test]
