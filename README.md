@@ -140,7 +140,7 @@ gurl -H "Accept: application/json" -H "X-Custom: value" https://api.example.com
 | `-f` | `--file`     | Load request from JSON file                 |
 | `-p` | `--pretty`   | Pretty print JSON with syntax highlighting  |
 | `-v` | `--verbose`  | Show full curl command and request details  |
-| `-s` | `--silent`   | Suppress progress meter                     |
+| `-s` | `--silent`   | Only the response: no banner, no status     |
 | `-L` | `--location` | Follow redirects                            |
 | `-t` | `--timeout`  | Request timeout in seconds                  |
 | `-o` | `--output`   | Save response to file                       |
@@ -178,6 +178,15 @@ gurl -m POST -d '{"email":"test@example.com"}' :3000/api/register
 ```
 
 ## Output
+
+The response is the only thing written to stdout. The request banner, HTTP
+status and timing go to stderr, so piping and redirecting just work — binary
+responses included:
+
+```bash
+gurl https://api.example.com/users | jq '.[0]'
+gurl https://example.com/logo.png > logo.png
+```
 
 With `--pretty`, you get:
 
