@@ -1,6 +1,8 @@
+use crate::curl::CurlRequest;
 use colored::*;
 use serde_json::Value;
 use std::path::Path;
+use std::time::Duration;
 
 /// Pretty print JSON with syntax highlighting
 pub fn print_json_colored(value: &Value, indent: usize) {
@@ -59,14 +61,10 @@ pub fn format_request_body(data: &str) -> String {
     }
 }
 
-pub fn print_request_info(
-    method: &str,
-    url: &str,
-    headers: &[String],
-    data: Option<&str>,
-    verbose: bool,
-    file_path: Option<&Path>,
-) {
+/// Request banner. Like every gurl decoration it goes to stderr, so stdout
+/// carries nothing but the response.
+pub fn print_request_info(req: &CurlRequest, file_path: Option<&Path>) {
+    let method = req.method.as_str();
     let method_color = match method {
         "GET" => method.green(),
         "POST" => method.yellow(),
@@ -76,64 +74,107 @@ pub fn print_request_info(
         _ => method.white(),
     };
 
-    println!();
+    eprintln!();
     if let Some(path) = file_path {
-        println!(
+        eprintln!(
             "{} {}",
             "📄".dimmed(),
             format!("Loading from {}", path.display()).dimmed()
         );
     }
-    println!(
+    eprintln!(
         "{} {} {}",
         "▶".bold().cyan(),
         method_color.bold(),
-        url.underline()
+        req.url.underline()
     );
 
-    if verbose {
-        if !headers.is_empty() {
-            println!("{}", "  Headers:".dimmed());
-            for h in headers {
-                println!("    {}", h.dimmed());
+    if req.verbose {
+        if !req.headers.is_empty() {
+            eprintln!("{}", "  Headers:".dimmed());
+            for h in &req.headers {
+                eprintln!("    {}", h.dimmed());
             }
         }
 
-        if let Some(body) = data {
-            println!("{}", "  Body:".dimmed());
+        if let Some(ref body) = req.body {
+            eprintln!("{}", "  Body:".dimmed());
             let formatted = format_request_body(body);
             for line in formatted.lines() {
-                println!("    {}", line.dimmed());
+                eprintln!("    {}", line.dimmed());
             }
         }
     }
 
-    println!();
+    eprintln!();
 }
 
-pub fn print_status_code(code: u16) {
-    let colored_code = match code {
-        200..=299 => code.to_string().green().bold(),
-        300..=399 => code.to_string().cyan().bold(),
-        400..=499 => code.to_string().yellow().bold(),
-        500..=599 => code.to_string().red().bold(),
-        _ => code.to_string().white().bold(),
-    };
-    print!("{colored_code} ");
+fn status_colored(code: u16, text: &str) -> ColoredString {
+    match code {
+        200..=299 => text.green().bold(),
+        300..=399 => text.cyan().bold(),
+        400..=499 => text.yellow().bold(),
+        500..=599 => text.red().bold(),
+        _ => text.white().bold(),
+    }
 }
 
-pub fn print_error(code: Option<i32>) {
-    let code = code.unwrap_or(1);
-    let msg = match code {
-        6 => "Could not resolve host",
-        7 => "Failed to connect to host",
-        28 => "Operation timed out",
-        35 => "SSL connect error",
-        52 => "Empty reply from server",
-        56 => "Failure in receiving network data",
-        _ => "Request failed",
-    };
-    eprintln!("{} {} (exit code {code})", "✗".red().bold(), msg.red());
+/// Status code of an `HTTP/x <code> [reason]` line
+fn status_line_code(line: &str) -> Option<u16> {
+    line.strip_prefix("HTTP/")?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// Print the response headers curl's `-i` emits, highlighted. They are part
+/// of the requested output, so they go to stdout.
+pub fn print_response_headers(headers: &str) {
+    for line in headers.lines() {
+        if let Some(code) = status_line_code(line) {
+            println!("{}", status_colored(code, line));
+        } else if let Some((name, value)) = line.split_once(':') {
+            println!("{}:{value}", name.cyan());
+        } else {
+            println!("{line}");
+        }
+    }
+}
+
+pub fn print_success_footer(status: Option<u16>, elapsed: Duration) {
+    eprintln!();
+    // curl succeeded, but the server may still have answered with an error
+    let failed = status.is_some_and(|code| code >= 400);
+    if let Some(code) = status {
+        eprint!("{} ", status_colored(code, &code.to_string()));
+    }
+    if failed {
+        eprintln!(
+            "{} {} in {elapsed:.2?}",
+            "✗".red().bold(),
+            "Error response received".red()
+        );
+    } else {
+        eprintln!(
+            "{} {} in {elapsed:.2?}",
+            "✓".green().bold(),
+            "Response received".green()
+        );
+    }
+}
+
+/// curl itself failed; it has already explained why on stderr (`-S`).
+pub fn print_failure_footer(status: Option<u16>, exit_code: i32, elapsed: Duration) {
+    eprintln!();
+    if let Some(code) = status {
+        eprint!("{} ", status_colored(code, &code.to_string()));
+    }
+    eprintln!(
+        "{} {} in {elapsed:.2?} (curl exit code {exit_code})",
+        "✗".red().bold(),
+        "Failed".red()
+    );
 }
 
 #[cfg(test)]
@@ -142,10 +183,10 @@ mod tests {
 
     #[test]
     fn format_request_body_valid_json() {
-        let result = format_request_body(r#"{"key":"value"}"#);
-        assert!(result.contains("key"));
-        assert!(result.contains("value"));
-        assert!(result.contains('\n'));
+        assert_eq!(
+            format_request_body(r#"{"key":"value"}"#),
+            "{\n  \"key\": \"value\"\n}"
+        );
     }
 
     #[test]
@@ -155,18 +196,10 @@ mod tests {
     }
 
     #[test]
-    fn print_error_known_codes() {
-        print_error(Some(6));
-        print_error(Some(7));
-        print_error(Some(28));
-        print_error(Some(35));
-        print_error(Some(52));
-        print_error(Some(56));
-    }
-
-    #[test]
-    fn print_error_unknown_code() {
-        print_error(Some(99));
-        print_error(None);
+    fn status_line_code_parses_http_versions() {
+        assert_eq!(status_line_code("HTTP/1.1 404 Not Found"), Some(404));
+        assert_eq!(status_line_code("HTTP/2 200 "), Some(200));
+        assert_eq!(status_line_code("HTTP/1.1"), None);
+        assert_eq!(status_line_code("Content-Type: text/html"), None);
     }
 }

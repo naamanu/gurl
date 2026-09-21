@@ -1,10 +1,8 @@
-use crate::format;
-use colored::*;
-use serde_json::Value;
-use std::io;
-use std::process::Command;
-use std::time::Instant;
+/// Marks the line on curl's stderr that carries response metadata for gurl.
+pub const META_SENTINEL: &str = "__GURL_META__";
 
+/// Everything that determines the curl invocation.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct CurlRequest {
     pub method: String,
     pub url: String,
@@ -16,11 +14,30 @@ pub struct CurlRequest {
     pub timeout: Option<u64>,
     pub output: Option<String>,
     pub user: Option<String>,
-    pub pretty: bool,
     pub extra_args: Vec<String>,
 }
 
+/// curl `--write-out` format that reports response metadata on stderr, on a
+/// line of its own, so stdout carries nothing but the response.
+/// Content type goes last because it may contain spaces.
+pub fn meta_write_out() -> String {
+    format!(
+        "%{{stderr}}\n{META_SENTINEL} %{{http_code}} %{{time_total}} %{{size_download}} %{{content_type}}\n"
+    )
+}
+
+/// The arguments curl is actually run with.
 pub fn build_curl_args(req: &CurlRequest) -> Vec<String> {
+    build(req, true)
+}
+
+/// The arguments as the user would type them: without the plumbing gurl adds
+/// for itself (`-sS`, the metadata `-w`).
+pub fn display_curl_args(req: &CurlRequest) -> Vec<String> {
+    build(req, false)
+}
+
+fn build(req: &CurlRequest, plumbing: bool) -> Vec<String> {
     let mut args = Vec::new();
 
     args.push("-X".into());
@@ -43,8 +60,10 @@ pub fn build_curl_args(req: &CurlRequest) -> Vec<String> {
         args.push("-i".into());
     }
 
-    // Always suppress progress meter since we capture output
-    args.push("-s".into());
+    // No progress meter (it would interleave with our output), but keep errors
+    if plumbing {
+        args.push("-sS".into());
+    }
 
     if req.location {
         args.push("-L".into());
@@ -65,144 +84,39 @@ pub fn build_curl_args(req: &CurlRequest) -> Vec<String> {
         args.push(user.clone());
     }
 
-    for arg in &req.extra_args {
-        args.push(arg.clone());
+    // Before the extra args, so a user-supplied -w wins over ours
+    if plumbing {
+        args.push("-w".into());
+        args.push(meta_write_out());
     }
 
-    // Write format to extract HTTP status code
-    args.push("-w".into());
-    args.push("\n%{http_code}".into());
+    args.extend(req.extra_args.iter().cloned());
 
     args.push(req.url.clone());
 
     args
 }
 
-pub fn execute_request(req: &CurlRequest) -> anyhow::Result<()> {
-    let curl_args = build_curl_args(req);
-
-    if req.verbose {
-        eprintln!(
-            "{} curl {}",
-            "Command:".dimmed(),
-            curl_args.join(" ").dimmed()
-        );
-        eprintln!();
-    }
-
-    let start = Instant::now();
-
-    let mut cmd = Command::new("curl");
-    for arg in &curl_args {
-        cmd.arg(arg);
-    }
-
-    let output = match cmd.output() {
-        Ok(output) => output,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            anyhow::bail!("curl is not installed or not in PATH. Please install curl to use gurl.");
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    let elapsed = start.elapsed();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse HTTP status code from the last line (added by -w "\n%{http_code}")
-    let (body, status_code) = parse_status_code(&stdout);
-
-    if output.status.success() {
-        if req.output.is_none() {
-            if req.pretty {
-                if let Ok(json) = serde_json::from_str::<Value>(body) {
-                    format::print_json_colored(&json, 0);
-                    println!();
-                } else {
-                    print!("{body}");
-                }
-            } else {
-                print!("{body}");
-            }
-        }
-
-        println!();
-        if let Some(code) = status_code {
-            format::print_status_code(code);
-        }
-        println!(
-            "{} {} in {:.2?}",
-            "✓".green().bold(),
-            "Response received".green(),
-            elapsed
-        );
-    } else {
-        // Try to pretty-print error response body if present
-        if !body.is_empty() {
-            if req.pretty {
-                if let Ok(json) = serde_json::from_str::<Value>(body) {
-                    format::print_json_colored(&json, 0);
-                    println!();
-                } else {
-                    eprint!("{body}");
-                }
-            } else {
-                eprint!("{body}");
-            }
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            eprint!("{stderr}");
-        }
-        println!();
-        if let Some(code) = status_code {
-            format::print_status_code(code);
-        }
-        format::print_error(output.status.code());
-        eprintln!("{} in {:.2?}", "Failed".red(), elapsed);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
-}
-
-fn parse_status_code(stdout: &str) -> (&str, Option<u16>) {
-    if let Some(pos) = stdout.rfind('\n') {
-        let potential_code = &stdout[pos + 1..];
-        if let Ok(code) = potential_code.trim().parse::<u16>()
-            && (100..=599).contains(&code)
-        {
-            return (&stdout[..pos], Some(code));
-        }
-    }
-    (stdout, None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strs(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
 
     #[test]
     fn build_curl_args_basic_get() {
         let req = CurlRequest {
             method: "GET".into(),
             url: "https://example.com".into(),
-            headers: vec![],
-            body: None,
-            verbose: false,
-            include: false,
-            location: false,
-            timeout: None,
-            output: None,
-            user: None,
-            pretty: false,
-            extra_args: vec![],
+            ..Default::default()
         };
-        let args = build_curl_args(&req);
-        assert!(args.contains(&"-X".to_string()));
-        assert!(args.contains(&"GET".to_string()));
-        assert!(args.contains(&"-s".to_string()));
-        assert!(args.contains(&"-w".to_string()));
-        assert_eq!(args.last().unwrap(), "https://example.com");
+        let meta = meta_write_out();
+        assert_eq!(
+            strs(&build_curl_args(&req)),
+            vec!["-X", "GET", "-sS", "-w", &meta, "https://example.com"]
+        );
     }
 
     #[test]
@@ -210,22 +124,28 @@ mod tests {
         let req = CurlRequest {
             method: "POST".into(),
             url: "https://example.com/api".into(),
-            headers: vec!["Content-Type: application/json".into()],
+            headers: vec!["Content-Type: application/json".into(), "X-A: 1".into()],
             body: Some(r#"{"key":"value"}"#.into()),
-            verbose: false,
-            include: false,
-            location: false,
-            timeout: None,
-            output: None,
-            user: None,
-            pretty: true,
-            extra_args: vec![],
+            ..Default::default()
         };
-        let args = build_curl_args(&req);
-        assert!(args.contains(&"-d".to_string()));
-        assert!(args.contains(&r#"{"key":"value"}"#.to_string()));
-        assert!(args.contains(&"-H".to_string()));
-        assert!(args.contains(&"Content-Type: application/json".to_string()));
+        let meta = meta_write_out();
+        assert_eq!(
+            strs(&build_curl_args(&req)),
+            vec![
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-H",
+                "X-A: 1",
+                "-d",
+                r#"{"key":"value"}"#,
+                "-sS",
+                "-w",
+                &meta,
+                "https://example.com/api"
+            ]
+        );
     }
 
     #[test]
@@ -233,87 +153,79 @@ mod tests {
         let req = CurlRequest {
             method: "GET".into(),
             url: "https://example.com".into(),
-            headers: vec![],
-            body: None,
             verbose: true,
             include: true,
             location: true,
             timeout: Some(30),
             output: Some("out.json".into()),
             user: Some("admin:pass".into()),
-            pretty: false,
-            extra_args: vec!["--compressed".into()],
+            extra_args: vec!["-k".into(), "--compressed".into()],
+            ..Default::default()
         };
-        let args = build_curl_args(&req);
-        assert!(args.contains(&"-v".to_string()));
-        assert!(args.contains(&"-i".to_string()));
-        assert!(args.contains(&"-L".to_string()));
-        assert!(args.contains(&"--max-time".to_string()));
-        assert!(args.contains(&"30".to_string()));
-        assert!(args.contains(&"-o".to_string()));
-        assert!(args.contains(&"out.json".to_string()));
-        assert!(args.contains(&"-u".to_string()));
-        assert!(args.contains(&"admin:pass".to_string()));
-        assert!(args.contains(&"--compressed".to_string()));
+        let meta = meta_write_out();
+        assert_eq!(
+            strs(&build_curl_args(&req)),
+            vec![
+                "-X",
+                "GET",
+                "-v",
+                "-i",
+                "-sS",
+                "-L",
+                "--max-time",
+                "30",
+                "-o",
+                "out.json",
+                "-u",
+                "admin:pass",
+                "-w",
+                &meta,
+                "-k",
+                "--compressed",
+                "https://example.com"
+            ]
+        );
     }
 
     #[test]
-    fn build_curl_args_extra_args_before_url() {
+    fn user_write_out_comes_after_ours() {
         let req = CurlRequest {
             method: "GET".into(),
             url: "https://example.com".into(),
-            headers: vec![],
-            body: None,
-            verbose: false,
-            include: false,
-            location: false,
-            timeout: None,
-            output: None,
-            user: None,
-            pretty: false,
-            extra_args: vec!["-k".into(), "--compressed".into()],
+            extra_args: vec!["-w".into(), "%{http_code}".into()],
+            ..Default::default()
         };
         let args = build_curl_args(&req);
-        let url_pos = args
+        let positions: Vec<_> = args
             .iter()
-            .position(|a| a == "https://example.com")
-            .unwrap();
-        let k_pos = args.iter().position(|a| a == "-k").unwrap();
-        assert!(k_pos < url_pos);
+            .enumerate()
+            .filter(|(_, a)| *a == "-w")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(args[positions[0] + 1], meta_write_out());
+        assert_eq!(args[positions[1] + 1], "%{http_code}");
     }
 
     #[test]
-    fn parse_status_code_200() {
-        let (body, code) = parse_status_code("response body\n200");
-        assert_eq!(body, "response body");
-        assert_eq!(code, Some(200));
+    fn display_args_omit_plumbing() {
+        let req = CurlRequest {
+            method: "DELETE".into(),
+            url: "https://example.com/1".into(),
+            location: true,
+            extra_args: vec!["-k".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            strs(&display_curl_args(&req)),
+            vec!["-X", "DELETE", "-L", "-k", "https://example.com/1"]
+        );
     }
 
     #[test]
-    fn parse_status_code_404() {
-        let (body, code) = parse_status_code("{\"error\":\"not found\"}\n404");
-        assert_eq!(body, "{\"error\":\"not found\"}");
-        assert_eq!(code, Some(404));
-    }
-
-    #[test]
-    fn parse_status_code_no_code() {
-        let (body, code) = parse_status_code("just some text");
-        assert_eq!(body, "just some text");
-        assert_eq!(code, None);
-    }
-
-    #[test]
-    fn parse_status_code_empty_body() {
-        let (body, code) = parse_status_code("\n200");
-        assert_eq!(body, "");
-        assert_eq!(code, Some(200));
-    }
-
-    #[test]
-    fn parse_status_code_multiline_body() {
-        let (body, code) = parse_status_code("line1\nline2\nline3\n201");
-        assert_eq!(body, "line1\nline2\nline3");
-        assert_eq!(code, Some(201));
+    fn meta_write_out_targets_stderr_on_its_own_line() {
+        let w = meta_write_out();
+        assert!(w.starts_with("%{stderr}\n__GURL_META__ %{http_code} "));
+        assert!(w.ends_with(" %{content_type}\n"));
     }
 }
