@@ -40,7 +40,7 @@ pub fn build_curl_args(req: &CurlRequest) -> Vec<String> {
 }
 
 /// The arguments as the user would type them: without the plumbing gurl adds
-/// for itself (`-sS`, the metadata `-w`).
+/// for itself (`-sSN`, the metadata `-w`).
 pub fn display_curl_args(req: &CurlRequest) -> Vec<String> {
     build(req, false)
 }
@@ -125,9 +125,12 @@ fn build(req: &CurlRequest, plumbing: bool) -> Vec<String> {
         args.push("-i".into());
     }
 
-    // No progress meter (it would interleave with our output), but keep errors
+    // -sS: no progress meter (it would interleave with our output), but keep
+    // errors. -N: curl's stdout is never a terminal here (it is a pipe to
+    // gurl, or gurl's own redirected stdout), so without it curl holds the
+    // response back in a buffer instead of streaming it.
     if plumbing {
-        args.push("-sS".into());
+        args.push("-sSN".into());
     }
 
     if req.location {
@@ -180,7 +183,7 @@ mod tests {
         let meta = meta_write_out();
         assert_eq!(
             strs(&build_curl_args(&req)),
-            vec!["-sS", "-w", &meta, "https://example.com"]
+            vec!["-sSN", "-w", &meta, "https://example.com"]
         );
     }
 
@@ -203,7 +206,7 @@ mod tests {
                 "X-A: 1",
                 "--data-raw",
                 r#"{"key":"value"}"#,
-                "-sS",
+                "-sSN",
                 "-w",
                 &meta,
                 "https://example.com/api"
@@ -231,7 +234,7 @@ mod tests {
             vec![
                 "-v",
                 "-i",
-                "-sS",
+                "-sSN",
                 "-L",
                 "--max-time",
                 "30",
