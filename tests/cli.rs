@@ -287,3 +287,136 @@ fn missing_url_is_a_usage_error() {
         .failure()
         .stderr(predicate::str::contains("URL is required"));
 }
+
+#[test]
+fn head_returns_headers_without_waiting_for_a_body() {
+    let server = TestServer::start();
+    gurl()
+        .args(["-m", "HEAD", &server.url("/json")])
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("HTTP/1.1 200 OK"));
+}
+
+#[test]
+fn at_prefix_sends_file_contents_byte_for_byte() {
+    let server = TestServer::start();
+    let mut body = tempfile::NamedTempFile::new().unwrap();
+    body.write_all(b"line1\nline2\n").unwrap();
+
+    gurl()
+        .arg("-d")
+        .arg(format!("@{}", body.path().display()))
+        .arg(server.url("/echo"))
+        .assert()
+        .success()
+        .stdout("line1\nline2\n");
+}
+
+#[test]
+fn at_prefix_reads_stdin() {
+    let server = TestServer::start();
+    gurl()
+        .args(["-d", "@-", &server.url("/echo")])
+        .write_stdin("from stdin")
+        .assert()
+        .success()
+        .stdout("from stdin");
+}
+
+#[test]
+fn string_body_in_request_file_is_never_read_as_a_file() {
+    let server = TestServer::start();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        file,
+        r#"{{"url": "{}", "body": "@/etc/hosts"}}"#,
+        server.url("/echo")
+    )
+    .unwrap();
+
+    gurl()
+        .arg("-f")
+        .arg(file.path())
+        .assert()
+        .success()
+        .stdout("@/etc/hosts");
+}
+
+#[test]
+fn pretty_keeps_the_servers_key_order() {
+    let server = TestServer::start();
+    gurl()
+        .args(["--pretty", "-d", r#"{"z":1,"a":2}"#, &server.url("/echo")])
+        .assert()
+        .success()
+        .stdout("{\n  \"z\": 1,\n  \"a\": 2\n}\n");
+}
+
+#[test]
+fn dry_run_prints_a_quoted_command_and_sends_nothing() {
+    gurl()
+        .args([
+            "--dry-run",
+            "-m",
+            "PUT",
+            "-H",
+            "Authorization: Bearer s3cret",
+            "-d",
+            r#"{"name":"O'Brien"}"#,
+            ":1/users/1",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            r#"curl -X PUT -H 'Authorization: ***' -H 'Content-Type: application/json' --data-raw '{"name":"O'\''Brien"}' http://localhost:1/users/1
+"#,
+        )
+        .stderr("");
+}
+
+#[test]
+fn show_secrets_reveals_credentials() {
+    gurl()
+        .args(["--dry-run", "--show-secrets", "-u", "me:pw", ":1/"])
+        .assert()
+        .success()
+        .stdout("curl -u me:pw http://localhost:1/\n");
+}
+
+#[test]
+fn verbose_masks_credentials_in_gurls_own_output() {
+    let server = TestServer::start();
+    gurl()
+        .args([
+            "-v",
+            "-H",
+            "Authorization: Bearer s3cret",
+            &server.url("/json"),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Command: curl -H 'Authorization: ***'",
+        ))
+        .stderr(predicate::str::contains("    Authorization: ***"));
+}
+
+#[test]
+fn closed_stdout_is_not_an_error() {
+    use std::process::{Command as StdCommand, Stdio};
+
+    let server = TestServer::start();
+    let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin("gurl"))
+        .args(["--pretty", "-s", &server.url("/json")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(!stderr.contains("Broken pipe"), "{stderr}");
+}

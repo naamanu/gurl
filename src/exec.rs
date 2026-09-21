@@ -2,7 +2,7 @@ use crate::curl::{self, CurlRequest, META_SENTINEL};
 use crate::format;
 use colored::*;
 use serde_json::Value;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Instant;
@@ -12,6 +12,7 @@ use std::time::Instant;
 pub struct RunOptions {
     pub pretty: bool,
     pub silent: bool,
+    pub show_secrets: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,33 +133,47 @@ fn header_block_len(bytes: &[u8]) -> Option<usize> {
     }
 }
 
-fn print_response(response: &[u8], include: bool) -> io::Result<()> {
-    let (head, body) = if include {
+fn write_response(w: &mut impl Write, response: &[u8], has_headers: bool) -> io::Result<()> {
+    let (head, body) = if has_headers {
         split_headers(response)
     } else {
         (&[][..], response)
     };
 
     if !head.is_empty() {
-        format::print_response_headers(&String::from_utf8_lossy(head));
+        format::write_response_headers(w, &String::from_utf8_lossy(head))?;
     }
 
     if let Ok(json) = serde_json::from_slice::<Value>(body) {
-        format::print_json_colored(&json, 0);
-        println!();
+        format::write_json(w, &json, 0)?;
+        writeln!(w)?;
     } else {
-        io::stdout().write_all(body)?;
+        w.write_all(body)?;
     }
-    io::stdout().flush()
+    w.flush()
+}
+
+fn print_response(response: &[u8], has_headers: bool) -> io::Result<()> {
+    let mut stdout = BufWriter::new(io::stdout().lock());
+    match write_response(&mut stdout, response, has_headers) {
+        // The reader went away (`gurl ... | head`): not an error
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }
 
 /// Run curl for `req` and return the exit code gurl should finish with.
 pub fn run(req: &CurlRequest, opts: &RunOptions) -> anyhow::Result<i32> {
     if req.verbose && !opts.silent {
+        let shown = if opts.show_secrets {
+            req.clone()
+        } else {
+            req.masked()
+        };
         eprintln!(
-            "{} curl {}",
+            "{} {}",
             "Command:".dimmed(),
-            curl::display_curl_args(req).join(" ").dimmed()
+            curl::display_command(&shown).dimmed()
         );
         eprintln!();
     }
