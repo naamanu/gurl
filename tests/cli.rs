@@ -65,7 +65,8 @@ fn handle(mut stream: TcpStream) {
     let request_body = buf[header_end..].to_vec();
 
     let path = head.split_whitespace().nth(1).unwrap_or("/");
-    let (status, content_type, extra, body): (&str, &str, &str, Vec<u8>) = match path {
+    let route = path.split('?').next().unwrap_or(path);
+    let (status, content_type, extra, body): (&str, &str, &str, Vec<u8>) = match route {
         "/json" => ("200 OK", "application/json", "", JSON_BODY.into()),
         "/missing" => (
             "404 Not Found",
@@ -76,6 +77,8 @@ fn handle(mut stream: TcpStream) {
         "/binary" => ("200 OK", "application/octet-stream", "", BINARY_BODY.into()),
         "/redirect" => ("302 Found", "text/plain", "Location: /json\r\n", vec![]),
         "/echo" => ("200 OK", "text/plain", "", request_body),
+        "/echo-path" => ("200 OK", "text/plain", "", path.as_bytes().to_vec()),
+        "/echo-headers" => ("200 OK", "text/plain", "", head.as_bytes().to_vec()),
         _ => ("500 Internal Server Error", "text/plain", "", vec![]),
     };
 
@@ -458,4 +461,183 @@ fn closed_stdout_is_not_an_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert!(!stderr.contains("Broken pipe"), "{stderr}");
+}
+
+#[test]
+fn items_send_a_json_body_headers_and_query() {
+    let server = TestServer::start();
+    gurl()
+        .args([
+            "-s",
+            &server.url("/echo"),
+            "name=Jo",
+            "age:=30",
+            "tags:=[\"a\"]",
+        ])
+        .assert()
+        .success()
+        .stdout(r#"{"name":"Jo","age":30,"tags":["a"]}"#);
+
+    gurl()
+        .args([
+            "-s",
+            &server.url("/echo-headers"),
+            "X-Api-Key:abc",
+            "name=Jo",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("POST /echo-headers "))
+        .stdout(predicate::str::contains("\r\nX-Api-Key: abc\r\n"))
+        .stdout(predicate::str::contains(
+            "\r\nContent-Type: application/json\r\n",
+        ))
+        .stdout(predicate::str::contains(
+            "\r\nAccept: application/json, */*;q=0.5\r\n",
+        ));
+
+    gurl()
+        .args([
+            "-s",
+            "-q",
+            "sort=-created at",
+            &server.url("/echo-path?a=1"),
+            "page==2",
+        ])
+        .assert()
+        .success()
+        .stdout("/echo-path?a=1&sort=-created%20at&page=2");
+}
+
+#[test]
+fn method_word_comes_before_the_url() {
+    let server = TestServer::start();
+    gurl()
+        .args(["-s", "DELETE", &server.url("/echo-headers")])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("DELETE /echo-headers "));
+}
+
+#[test]
+fn form_items_are_urlencoded() {
+    let server = TestServer::start();
+    gurl()
+        .args([
+            "-s",
+            "--form",
+            &server.url("/echo"),
+            "name=Jo Bloggs",
+            "x=a&b",
+        ])
+        .assert()
+        .success()
+        .stdout("name=Jo%20Bloggs&x=a%26b");
+}
+
+#[test]
+fn form_with_a_file_is_a_multipart_upload() {
+    let server = TestServer::start();
+    let mut upload = tempfile::NamedTempFile::new().unwrap();
+    upload.write_all(b"file contents here").unwrap();
+
+    gurl()
+        .args(["-s", "--form", &server.url("/echo"), "title=Hi"])
+        .arg(format!("doc@{}", upload.path().display()))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Content-Disposition: form-data; name=\"title\"\r\n\r\nHi\r\n",
+        ))
+        .stdout(predicate::str::contains("name=\"doc\"; filename="))
+        .stdout(predicate::str::contains("file contents here"));
+}
+
+#[test]
+fn stray_word_is_a_clear_error() {
+    gurl()
+        .args(["--dry-run", "example.com", "oops"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`oops` is not a request item"));
+}
+
+#[test]
+fn bearer_is_sent_and_masked() {
+    let server = TestServer::start();
+    gurl()
+        .args(["-s", "--bearer", "s3cret", &server.url("/echo-headers")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\r\nAuthorization: Bearer s3cret\r\n",
+        ));
+
+    gurl()
+        .args(["--dry-run", "--bearer", "s3cret", ":1/"])
+        .assert()
+        .success()
+        .stdout("curl -H 'Authorization: ***' http://localhost:1/\n");
+}
+
+fn request_file(contents: &str) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(contents.as_bytes()).unwrap();
+    file
+}
+
+#[test]
+fn request_file_variables_come_from_var_env_and_env_file() {
+    let server = TestServer::start();
+    let file = request_file(&format!(
+        r#"{{"url": "{}", "body": {{"a": "{{{{A}}}}", "b": "{{{{B}}}}", "c": "{{{{C}}}}"}}}}"#,
+        server.url("/echo")
+    ));
+    let env_file = request_file("A=from-env-file\nB=from-env-file\nC=from-env-file\n");
+
+    gurl()
+        .args(["-s", "--var", "A=from-var", "--env-file"])
+        .arg(env_file.path())
+        .arg("-f")
+        .arg(file.path())
+        .env("A", "from-env")
+        .env("B", "from-env")
+        .env_remove("C")
+        .assert()
+        .success()
+        .stdout(r#"{"a":"from-var","b":"from-env","c":"from-env-file"}"#);
+}
+
+#[test]
+fn undefined_variable_fails_before_sending() {
+    let file = request_file(
+        r#"{"url": "http://localhost:1/", "headers": ["Authorization: Bearer {{GURL_TEST_UNSET}}"]}"#,
+    );
+    gurl()
+        .arg("-f")
+        .arg(file.path())
+        .env_remove("GURL_TEST_UNSET")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Undefined variable `GURL_TEST_UNSET`",
+        ))
+        .stderr(predicate::str::contains("In request file"));
+}
+
+#[test]
+fn items_extend_a_request_file() {
+    let server = TestServer::start();
+    let file = request_file(&format!(
+        r#"{{"method": "PUT", "url": "{}"}}"#,
+        server.url("/echo-headers")
+    ));
+    gurl()
+        .args(["-s", "-f"])
+        .arg(file.path())
+        .args(["X-Extra:1", "name=Jo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("PUT /echo-headers "))
+        .stdout(predicate::str::contains("\r\nX-Extra: 1\r\n"));
 }

@@ -1,6 +1,8 @@
+use anyhow::Context;
 use clap::{CommandFactory, Parser};
 use gurl::args::{Args, Cli, Command};
 use gurl::exec::{self, PrettyChoice, RunOptions};
+use gurl::vars::{self, Vars};
 use gurl::{curl, format, request};
 
 /// Exit code for an HTTP error response under `--fail`, the same as curl's
@@ -24,10 +26,26 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn send(args: &Args) -> anyhow::Result<i32> {
+    let vars = Vars {
+        cli: vars::parse_cli_vars(&args.vars)?,
+        use_env: true,
+        env_file: args
+            .env_file
+            .as_deref()
+            .map(vars::load_env_file)
+            .transpose()?
+            .unwrap_or_default(),
+        defaults: Default::default(),
+    };
+
     let request_file = args
         .file
         .as_deref()
-        .map(request::load_request_file)
+        .map(|path| {
+            request::load_request_file(path)?
+                .substitute(&vars)
+                .with_context(|| format!("In request file {}", path.display()))
+        })
         .transpose()?;
 
     let req = request::resolve(args, request_file.as_ref())?;

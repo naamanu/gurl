@@ -1,4 +1,4 @@
-use crate::curl::{Body, CurlRequest};
+use crate::curl::{Body, CurlRequest, Part};
 use crate::exec::Meta;
 use colored::*;
 use serde_json::Value;
@@ -95,6 +95,14 @@ pub fn print_request_info(req: &CurlRequest, file_path: Option<&Path>) {
             let formatted = match body {
                 Body::Raw(data) => format_request_body(data),
                 Body::File(path) => format!("@{path}"),
+                Body::Multipart(parts) => parts
+                    .iter()
+                    .map(|part| match part {
+                        Part::Text { name, value } => format!("{name}={value}"),
+                        Part::File { name, path } => format!("{name}=@{path}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             };
             for line in formatted.lines() {
                 eprintln!("    {}", line.dimmed());
