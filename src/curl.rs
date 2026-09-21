@@ -7,6 +7,16 @@ pub enum Body {
     Raw(String),
     /// Contents of a file, or stdin for `-`, sent byte for byte (`--data-binary @path`)
     File(String),
+    /// A multipart/form-data upload
+    Multipart(Vec<Part>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    /// `--form-string name=value`: the value is literal, even with a leading `@` or `<`
+    Text { name: String, value: String },
+    /// `-F name=@path`: a file upload
+    File { name: String, path: String },
 }
 
 /// Everything that determines the curl invocation.
@@ -114,6 +124,20 @@ fn build(req: &CurlRequest, plumbing: bool) -> Vec<String> {
         Some(Body::File(path)) => {
             args.push("--data-binary".into());
             args.push(format!("@{path}"));
+        }
+        Some(Body::Multipart(parts)) => {
+            for part in parts {
+                match part {
+                    Part::Text { name, value } => {
+                        args.push("--form-string".into());
+                        args.push(format!("{name}={value}"));
+                    }
+                    Part::File { name, path } => {
+                        args.push("-F".into());
+                        args.push(format!("{name}=@{path}"));
+                    }
+                }
+            }
         }
         None => {}
     }
@@ -323,6 +347,35 @@ mod tests {
         assert_eq!(
             strs(&display_curl_args(&req)),
             vec!["--data-binary", "@big.json", "u"]
+        );
+    }
+
+    #[test]
+    fn multipart_body_uses_form_flags() {
+        let req = CurlRequest {
+            method: "POST".into(),
+            url: "u".into(),
+            body: Some(Body::Multipart(vec![
+                Part::Text {
+                    name: "title".into(),
+                    value: "@not-a-file".into(),
+                },
+                Part::File {
+                    name: "doc".into(),
+                    path: "a b.pdf".into(),
+                },
+            ])),
+            ..Default::default()
+        };
+        assert_eq!(
+            strs(&display_curl_args(&req)),
+            vec![
+                "--form-string",
+                "title=@not-a-file",
+                "-F",
+                "doc=@a b.pdf",
+                "u"
+            ]
         );
     }
 

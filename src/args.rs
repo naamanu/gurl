@@ -14,14 +14,25 @@ use std::path::PathBuf;
 Examples:
   gurl https://api.example.com/users          GET request (default)
   gurl :8080/health                            Localhost shorthand
-  gurl -m POST -d '{\"name\":\"foo\"}' :3000/api  POST with JSON body
-  gurl -f request.json                         Load request from file
+  gurl -d '{\"name\":\"foo\"}' :3000/api          POST with JSON body
+  gurl POST :3000/users name=Jo age:=30        POST {\"name\":\"Jo\",\"age\":30}
+  gurl :3000/search q==rust X-Api-Key:abc      Query parameter and header
+  gurl --form :3000/upload title=Hi doc@a.pdf  Multipart file upload
+  gurl -f request.json --var TOKEN=abc         Request file with {{TOKEN}}
   gurl --fail :3000/health && echo up          Exit non-zero on HTTP 4xx/5xx
-  gurl -H 'Authorization: Bearer tok' api.com  Custom header
+  gurl --bearer \"$TOKEN\" api.example.com/me    Bearer token
   gurl -L -t 30 https://example.com            Follow redirects, 30s timeout
   gurl -s https://api.example.com | jq .       Only the response, for scripts
   gurl --dry-run -d @body.json :3000/api       Show the curl command, don't run it
   gurl https://example.com -- -k --compressed  Pass extra args to curl
+
+Request items (after the URL):
+  Name:value     header (Name: with no value drops a header curl would send)
+  name==value    query parameter
+  name=value     string field of the JSON body (or form field with --form)
+  name:=json     raw JSON field: numbers, booleans, null, arrays, objects
+  name=@path     string field read from a file (name:=@path: JSON file)
+  name@path      file upload (--form)
 
 JSON responses are pretty-printed when stdout is a terminal; use --raw to
 turn that off, or --pretty to force it when piping."
@@ -48,9 +59,11 @@ pub enum Command {
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    /// The URL to request (use :port/path as shorthand for localhost)
-    /// Can be omitted if using --file with url field
-    pub url: Option<String>,
+    /// [METHOD] URL [ITEM]...: an optional method (GET, POST, ...), the URL
+    /// (:port/path is short for localhost; can be omitted when --file has
+    /// one), then request items
+    #[arg(value_name = "REQUEST")]
+    pub targets: Vec<String>,
 
     /// Request method (GET, POST, PUT, DELETE, PATCH, etc.)
     #[arg(short = 'm', long)]
@@ -65,9 +78,36 @@ pub struct Args {
     #[arg(short = 'H', long, visible_alias = "header")]
     pub headers: Vec<String>,
 
+    /// Query parameter NAME=VALUE, URL-encoded (can be used multiple times)
+    #[arg(short = 'q', long = "query", value_name = "NAME=VALUE")]
+    pub query: Vec<String>,
+
+    /// Send `Authorization: Bearer TOKEN`
+    #[arg(long, value_name = "TOKEN")]
+    pub bearer: Option<String>,
+
+    /// Send and accept JSON: sets Content-Type and Accept, even when -d
+    /// doesn't look like JSON
+    #[arg(long, conflicts_with = "form")]
+    pub json: bool,
+
+    /// Send request items as a form: URL-encoded, or multipart when a file
+    /// (name@path) is attached
+    #[arg(long)]
+    pub form: bool,
+
     /// Load request from JSON file (headers, body, method, url)
     #[arg(short, long)]
     pub file: Option<PathBuf>,
+
+    /// Define a {{NAME}} variable for the request file (can be used multiple
+    /// times). Also looked up: environment variables, then --env-file
+    #[arg(long = "var", value_name = "NAME=VALUE")]
+    pub vars: Vec<String>,
+
+    /// Read {{NAME}} variables from a .env-style file of NAME=VALUE lines
+    #[arg(long, value_name = "PATH")]
+    pub env_file: Option<PathBuf>,
 
     /// Include HTTP headers in the output
     #[arg(short = 'i', long)]
@@ -139,9 +179,9 @@ mod tests {
 
     #[test]
     fn url_without_subcommand() {
-        let cli = parse(&["-L", "example.com", "--", "-k"]);
+        let cli = parse(&["-L", "POST", "example.com", "a=1", "--", "-k"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.args.url.as_deref(), Some("example.com"));
+        assert_eq!(cli.args.targets, vec!["POST", "example.com", "a=1"]);
         assert_eq!(cli.args.extra_args, vec!["-k"]);
     }
 
@@ -152,6 +192,11 @@ mod tests {
             cli.command,
             Some(Command::Completions { shell: Shell::Fish })
         ));
+    }
+
+    #[test]
+    fn json_and_form_conflict() {
+        assert!(Cli::try_parse_from(["gurl", "--json", "--form", "x"]).is_err());
     }
 
     #[test]

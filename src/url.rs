@@ -46,9 +46,91 @@ fn is_local_host(host: &str) -> bool {
         || host.split('.').next() == Some("127") && host.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
+/// Percent-encode everything but RFC 3986 unreserved characters.
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Append encoded `name=value` pairs to the URL's query string, keeping any
+/// query it already has and any `#fragment` at the end.
+pub fn append_query(url: &str, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return url.to_string();
+    }
+    let (base, fragment) = match url.find('#') {
+        Some(pos) => url.split_at(pos),
+        None => (url, ""),
+    };
+    let encoded = pairs
+        .iter()
+        .map(|(name, value)| format!("{}={}", percent_encode(name), percent_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let sep = if !base.contains('?') {
+        "?"
+    } else if base.ends_with('?') || base.ends_with('&') {
+        ""
+    } else {
+        "&"
+    };
+    format!("{base}{sep}{encoded}{fragment}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+        p.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn percent_encode_keeps_only_unreserved() {
+        assert_eq!(percent_encode("abc-._~XYZ09"), "abc-._~XYZ09");
+        assert_eq!(percent_encode("a b&c=d/é"), "a%20b%26c%3Dd%2F%C3%A9");
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn append_query_to_bare_url() {
+        assert_eq!(
+            append_query(
+                "https://x.test/s",
+                &pairs(&[("q", "rust lang"), ("page", "2")])
+            ),
+            "https://x.test/s?q=rust%20lang&page=2"
+        );
+    }
+
+    #[test]
+    fn append_query_keeps_existing_query_and_fragment() {
+        assert_eq!(
+            append_query("https://x.test/s?a=1#top", &pairs(&[("b", "2")])),
+            "https://x.test/s?a=1&b=2#top"
+        );
+        assert_eq!(
+            append_query("https://x.test/s?", &pairs(&[("b", "2")])),
+            "https://x.test/s?b=2"
+        );
+    }
+
+    #[test]
+    fn append_query_with_nothing_is_a_no_op() {
+        assert_eq!(
+            append_query("https://x.test/?a=1", &[]),
+            "https://x.test/?a=1"
+        );
+    }
 
     #[test]
     fn expand_url_localhost_shorthand() {

@@ -5,7 +5,8 @@ A simple, colorful CLI wrapper around `curl` for easier terminal usage.
 ## Features
 
 - 🎨 **Syntax-highlighted JSON** - Pretty print responses with colored output
-- 📄 **Request files** - Load headers and body from JSON files
+- ✏️ **Request items** - `gurl POST :3000/users name=Jo age:=30 X-Key:abc`, httpie style
+- 📄 **Request files** - Load headers and body from JSON files, with `{{VARIABLES}}`
 - 🔍 **Smart JSON detection** - Auto-adds `Content-Type: application/json` when sending JSON
 - 🏠 **Localhost shorthand** - Use `:3000/api` instead of `http://localhost:3000/api`
 - ⏱️ **Status at a glance** - `✓ HTTP 200 OK · 41ms · 1.2 KB` after every request
@@ -93,6 +94,43 @@ jq -n '{name: "John"}' | gurl -d @- https://api.example.com/users
 `@` reads a file, and the file is sent byte for byte. A `body` in a request
 file is always sent as written, even if it starts with `@`.
 
+### Request Items
+
+After the URL, build the request from `key=value`-style items instead of
+writing JSON by hand. An optional method goes before the URL.
+
+```bash
+gurl POST :3000/users name=Jo age:=30 admin:=true tags:='["a","b"]'
+# → POST http://localhost:3000/users  {"name":"Jo","age":30,"admin":true,"tags":["a","b"]}
+
+gurl :3000/search q==rust page==2 X-Api-Key:abc
+# → GET http://localhost:3000/search?q=rust&page=2  with header X-Api-Key: abc
+
+gurl --form :3000/upload title=Report doc@report.pdf   # multipart upload
+gurl --form :3000/login user=jo pass=hunter2          # application/x-www-form-urlencoded
+```
+
+| Item          | Meaning                                                        |
+| ------------- | -------------------------------------------------------------- |
+| `Name:value`  | Header. `Name:` with nothing after it drops a header curl adds |
+| `name==value` | Query parameter, URL-encoded                                   |
+| `name=value`  | String field in the JSON body (form field with `--form`)       |
+| `name:=json`  | Raw JSON field: number, boolean, null, array, object           |
+| `name=@path`  | String field read from a text file                             |
+| `name:=@path` | JSON field read from a file                                    |
+| `name@path`   | File upload (`--form`, sent as multipart/form-data)            |
+
+Body fields make the request a POST unless a method is given, and send
+`Content-Type` and `Accept` for JSON. They can't be combined with `-d`.
+
+### Shortcuts
+
+```bash
+gurl --bearer "$TOKEN" api.example.com/me          # Authorization: Bearer ...
+gurl -q 'q=rust lang' -q page=2 api.example.com/s  # URL-encoded query parameters
+gurl --json -d @payload api.example.com/items      # JSON Content-Type and Accept, whatever -d looks like
+```
+
 ### Request Files
 
 Load complex requests from JSON files:
@@ -106,6 +144,9 @@ gurl --file request.json https://different-url.com
 
 # Override method from file
 gurl --file request.json -m PUT
+
+# Add to it with request items (the URL comes from the file)
+gurl --file request.json X-Trace:1 name=Jo
 ```
 
 **Request file format:**
@@ -138,6 +179,27 @@ removes a header curl would otherwise add. Headers can also be an array:
 }
 ```
 
+**Variables.** Any string in a request file can use `{{NAME}}`, so the file
+can be shared without the secrets in it:
+
+```json
+{
+  "url": "https://{{API_HOST}}/users",
+  "headers": { "Authorization": "Bearer {{TOKEN}}" }
+}
+```
+
+```bash
+gurl -f users.json --var API_HOST=api.example.com   # highest precedence
+TOKEN=abc gurl -f users.json                        # then the environment
+gurl -f users.json --env-file .env                  # then NAME=VALUE lines
+```
+
+An undefined variable is an error, raised before anything is sent. Values are
+inserted into the parsed JSON, so quotes in a value can't break the body.
+Write `\\{{` in a JSON string for a literal `{{`. Variables apply to request
+files only; on the command line, use your shell's `$VARIABLES`.
+
 ### Headers & Auth
 
 ```bash
@@ -158,7 +220,13 @@ gurl -H "Accept: application/json" -H "X-Custom: value" https://api.example.com
 | `-m` | `--method`       | HTTP method (default GET, or POST when sending data) |
 | `-d` | `--data`         | Request body, sent as-is; `@file` or `@-` for stdin |
 | `-H` | `--header`       | Add header (repeatable; `--headers` also works)     |
+| `-q` | `--query`        | Add a URL-encoded query parameter `NAME=VALUE`      |
+|      | `--bearer`       | Send `Authorization: Bearer TOKEN`                  |
+|      | `--json`         | Send JSON `Content-Type` and `Accept` headers       |
+|      | `--form`         | Send request items as a form (multipart with files) |
 | `-f` | `--file`         | Load request from JSON file                         |
+|      | `--var`          | Set a `{{NAME}}` request-file variable `NAME=VALUE` |
+|      | `--env-file`     | Read `{{NAME}}` variables from a `.env` file        |
 | `-p` | `--pretty`       | Pretty print JSON, even when piped                  |
 |      | `--raw`          | Never reformat the response, even on a terminal     |
 |      | `--fail`         | Exit 22 on HTTP 4xx/5xx (body is still printed)     |
