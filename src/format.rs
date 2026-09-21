@@ -3,7 +3,6 @@ use crate::exec::Meta;
 use colored::*;
 use serde_json::Value;
 use std::io::{self, Write};
-use std::path::Path;
 use std::time::Duration;
 
 /// Pretty print JSON with syntax highlighting
@@ -55,8 +54,9 @@ pub fn format_request_body(data: &str) -> String {
 }
 
 /// Request banner. Like every gurl decoration it goes to stderr, so stdout
-/// carries nothing but the response.
-pub fn print_request_info(req: &CurlRequest, file_path: Option<&Path>) {
+/// carries nothing but the response. `source` says where the request came
+/// from, e.g. `Loading from req.json`.
+pub fn print_request_info(req: &CurlRequest, source: Option<&str>) {
     let method = req.method.as_str();
     let method_color = match method {
         "GET" => method.green(),
@@ -68,12 +68,8 @@ pub fn print_request_info(req: &CurlRequest, file_path: Option<&Path>) {
     };
 
     eprintln!();
-    if let Some(path) = file_path {
-        eprintln!(
-            "{} {}",
-            "📄".dimmed(),
-            format!("Loading from {}", path.display()).dimmed()
-        );
+    if let Some(source) = source {
+        eprintln!("{} {}", "📄".dimmed(), source.dimmed());
     }
     eprintln!(
         "{} {} {}",
